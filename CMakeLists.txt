@@ -46,9 +46,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/lsm6dsv_reg.c
-    # Core/Src/sensor_manager.c
-    # Core/Src/comm_protocol.c
-    # Core/Src/data_formatter.c
+    Core/Src/sensor_manager.c
+    Core/Src/comm_protocol.c
+    Core/Src/data_formatter.c
     Core/Src/platform_i2c.c
 )
 
