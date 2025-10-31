@@ -21,7 +21,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
+#include "lsm6dsv_reg.h"
+#include "platform_i2c.h"
+#include "sensor_manager.h"
+#include "comm_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,6 +38,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* LSM6DSV I2C Addresses */
+#define LSM6DSV_I2C_ADDR_LOW  (0x6A << 1)  // SDO/SA0 pin low (default)
+#define LSM6DSV_I2C_ADDR_HIGH (0x6B << 1)  // SDO/SA0 pin high
+
+/* Default I2C address - can be changed via command */
+#define LSM6DSV_I2C_ADDR_DEFAULT  LSM6DSV_I2C_ADDR_HIGH
+
+/* UART TX Buffer Size */
+#define UART_TX_BUFFER_SIZE 256
 
 /* USER CODE END PD */
 
@@ -43,9 +60,42 @@
 
 I2C_HandleTypeDef hi2c2;
 
+TIM_HandleTypeDef htim2;
+
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+
+/* LSM6DSV Sensor Context */
+static stmdev_ctx_t lsm6dsv_ctx;
+static platform_ctx_t platform_ctx __attribute__((unused)); /* Initialized for future use */
+
+/* Sensor Data Buffers */
+static int16_t accel_raw[3] = {0};
+static int16_t gyro_raw[3] = {0};
+static float accel_mg[3] = {0.0f, 0.0f, 0.0f};
+static float gyro_mdps[3] = {0.0f, 0.0f, 0.0f};
+static uint8_t data_valid = 0;  /* Flag to indicate if sensor data has been read at least once */
+static int16_t temperature_raw __attribute__((unused)); /* Reserved for future use */
+
+/* SFLP Data (Sensor Fusion) */
+static float sflp_quat[4];  // w, x, y, z
+static uint8_t sflp_enabled = 0;
+
+/* Streaming Control */
+static uint8_t streaming_enabled = 0;
+
+/* UART Buffers */
+static uint8_t uart_tx_buffer[UART_TX_BUFFER_SIZE];
+static uint8_t uart_rx_byte;  // Single byte for UART RX interrupt
+
+/* Sensor Status */
+static uint8_t sensor_initialized = 0;
+static uint8_t current_i2c_address = LSM6DSV_I2C_ADDR_DEFAULT;
+
+/* Interrupt Flags */
+static volatile uint8_t int1_flag = 0;
+static volatile uint8_t int2_flag = 0;
 
 /* USER CODE END PV */
 
@@ -55,13 +105,268 @@ static void SystemPower_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_ICACHE_Init(void);
+static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
+
+/* LSM6DSV Functions */
+static int32_t LSM6DSV_AutoDetectI2C(void);
+static int32_t LSM6DSV_Init(void);
+static void LSM6DSV_ReadData(void);
+static void LSM6DSV_ReadSFLP(void);
+static void LSM6DSV_PrintData(void);
+
+/* Utility Functions */
+static void UART_Transmit(uint8_t *data, uint16_t len);
+static uint32_t Get_Microseconds(void);
+
+/* I2C Platform Functions */
+static int32_t platform_write_wrapper(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len);
+static int32_t platform_read_wrapper(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* ============================================================================
+ * I2C Platform Functions
+ * ============================================================================ */
+
+/**
+ * @brief  Write data to I2C device
+ */
+static int32_t platform_write_wrapper(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len)
+{
+    uint8_t device_addr = (uint8_t)(uintptr_t)handle;
+
+    if (HAL_I2C_Mem_Write(&hi2c2, device_addr, reg, I2C_MEMADD_SIZE_8BIT,
+                          (uint8_t*)bufp, len, 1000) != HAL_OK)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief  Read data from I2C device
+ */
+static int32_t platform_read_wrapper(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len)
+{
+    uint8_t device_addr = (uint8_t)(uintptr_t)handle;
+
+    if (HAL_I2C_Mem_Read(&hi2c2, device_addr, reg, I2C_MEMADD_SIZE_8BIT,
+                         bufp, len, 1000) != HAL_OK)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+/* ============================================================================
+ * Utility Functions
+ * ============================================================================ */
+
+/**
+ * @brief  Get microsecond timestamp from TIM2
+ */
+static uint32_t Get_Microseconds(void)
+{
+    return __HAL_TIM_GET_COUNTER(&htim2);
+}
+
+/**
+ * @brief  Transmit data via UART
+ */
+static void UART_Transmit(uint8_t *data, uint16_t len)
+{
+    HAL_UART_Transmit(&huart1, data, len, 1000);
+}
+
+/* ============================================================================
+ * LSM6DSV Functions
+ * ============================================================================ */
+
+/**
+ * @brief  Auto-detect LSM6DSV I2C address
+ * @retval 0 on success with address detected, -1 if not found
+ */
+static int32_t LSM6DSV_AutoDetectI2C(void)
+{
+    uint8_t whoami;
+    uint8_t addresses[] = {LSM6DSV_I2C_ADDR_LOW, LSM6DSV_I2C_ADDR_HIGH};
+
+    /* Try both possible I2C addresses */
+    for (int i = 0; i < 2; i++) {
+        /* Setup temporary context for this address */
+        stmdev_ctx_t temp_ctx;
+        temp_ctx.write_reg = platform_write_wrapper;
+        temp_ctx.read_reg = platform_read_wrapper;
+        temp_ctx.handle = (void*)(uintptr_t)addresses[i];
+
+        /* Try to read WHO_AM_I register (0x0F) */
+        if (lsm6dsv_device_id_get(&temp_ctx, &whoami) == 0) {
+            /* Verify it's actually an LSM6DSV (WHO_AM_I should be 0x70) */
+            if (whoami == LSM6DSV_ID) {
+                current_i2c_address = addresses[i];
+                return 0;  /* Success! */
+            }
+        }
+    }
+
+    /* No LSM6DSV found at either address */
+    return -1;
+}
+
+/**
+ * @brief  Initialize LSM6DSV sensor
+ * @retval 0 on success, -1 on error
+ */
+static int32_t LSM6DSV_Init(void)
+{
+    uint8_t whoami;
+    int32_t ret;
+
+    /* Setup platform context */
+    lsm6dsv_ctx.write_reg = platform_write_wrapper;
+    lsm6dsv_ctx.read_reg = platform_read_wrapper;
+    lsm6dsv_ctx.handle = (void*)(uintptr_t)current_i2c_address;
+
+    /* Check WHO_AM_I */
+    ret = lsm6dsv_device_id_get(&lsm6dsv_ctx, &whoami);
+    if (ret != 0 || whoami != LSM6DSV_ID) {
+        return -1;
+    }
+
+    /* Software reset */
+    lsm6dsv_reset_set(&lsm6dsv_ctx, LSM6DSV_RESTORE_CTRL_REGS);
+    HAL_Delay(10);
+
+    /* Wait for reset to complete */
+    lsm6dsv_reset_t rst;
+    do {
+        lsm6dsv_reset_get(&lsm6dsv_ctx, &rst);
+        HAL_Delay(1);
+    } while (rst != LSM6DSV_READY);
+
+    /* Enable Block Data Update */
+    lsm6dsv_block_data_update_set(&lsm6dsv_ctx, PROPERTY_ENABLE);
+
+    /* Set accelerometer: MODE first, then full scale, then ODR (turns on sensor) */
+    lsm6dsv_xl_mode_set(&lsm6dsv_ctx, LSM6DSV_XL_HIGH_PERFORMANCE_MD);
+    lsm6dsv_xl_full_scale_set(&lsm6dsv_ctx, LSM6DSV_4g);
+    lsm6dsv_xl_data_rate_set(&lsm6dsv_ctx, LSM6DSV_ODR_AT_120Hz);
+
+    /* Set gyroscope: MODE first, then full scale, then ODR (turns on sensor) */
+    lsm6dsv_gy_mode_set(&lsm6dsv_ctx, LSM6DSV_GY_HIGH_PERFORMANCE_MD);
+    lsm6dsv_gy_full_scale_set(&lsm6dsv_ctx, LSM6DSV_2000dps);
+    lsm6dsv_gy_data_rate_set(&lsm6dsv_ctx, LSM6DSV_ODR_AT_120Hz);
+
+    /* Wait for sensor to stabilize and start sampling */
+    HAL_Delay(10);
+
+    sensor_initialized = 1;
+
+    return 0;
+}
+
+/**
+ * @brief  Read accelerometer and gyroscope data
+ * @note   Event-driven: only prints when both accel AND gyro data are ready
+ */
+static void LSM6DSV_ReadData(void)
+{
+    lsm6dsv_data_ready_t drdy;
+
+    /* Check if data is ready */
+    lsm6dsv_flag_data_ready_get(&lsm6dsv_ctx, &drdy);
+
+    /* Only process and print if BOTH accelerometer AND gyroscope data are ready */
+    if (drdy.drdy_xl && drdy.drdy_gy) {
+        /* Read accelerometer data */
+        lsm6dsv_acceleration_raw_get(&lsm6dsv_ctx, accel_raw);
+
+        /* Convert to mg (±4g range) */
+        accel_mg[0] = lsm6dsv_from_fs4_to_mg(accel_raw[0]);
+        accel_mg[1] = lsm6dsv_from_fs4_to_mg(accel_raw[1]);
+        accel_mg[2] = lsm6dsv_from_fs4_to_mg(accel_raw[2]);
+
+        /* Read gyroscope data */
+        lsm6dsv_angular_rate_raw_get(&lsm6dsv_ctx, gyro_raw);
+
+        /* Convert to mdps (±2000dps range) */
+        gyro_mdps[0] = lsm6dsv_from_fs2000_to_mdps(gyro_raw[0]);
+        gyro_mdps[1] = lsm6dsv_from_fs2000_to_mdps(gyro_raw[1]);
+        gyro_mdps[2] = lsm6dsv_from_fs2000_to_mdps(gyro_raw[2]);
+
+        /* Mark data as valid */
+        data_valid = 1;
+
+        /* Print data immediately when ready (event-driven) */
+        if (streaming_enabled) {
+            LSM6DSV_PrintData();
+            BSP_LED_Toggle(LED_BLUE);  /* Visual feedback: blink blue LED on data output */
+        }
+    }
+}
+
+/**
+ * @brief  Read SFLP (Sensor Fusion) data
+ * @note   SFLP quaternion reading not implemented - driver API not available
+ */
+static void LSM6DSV_ReadSFLP(void)
+{
+    /* SFLP quaternion data reading would go here */
+    /* This driver version doesn't expose the quaternion data registers */
+    /* SFLP can still be enabled via commands for future use */
+    (void)sflp_enabled;  /* Suppress warning */
+}
+
+/**
+ * @brief  Print sensor data via UART in CSV format
+ */
+static void LSM6DSV_PrintData(void)
+{
+    uint32_t timestamp = Get_Microseconds();
+    int len;
+
+    /* Only print if we have valid data */
+    if (!data_valid) {
+        return;
+    }
+
+    /* Clear buffer to ensure clean state */
+    memset(uart_tx_buffer, 0, UART_TX_BUFFER_SIZE);
+
+    /* Print accelerometer and gyroscope data */
+    len = sprintf((char*)uart_tx_buffer,
+                  "LSM6DSV,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\r\n",
+                  timestamp,
+                  accel_mg[0], accel_mg[1], accel_mg[2],
+                  gyro_mdps[0], gyro_mdps[1], gyro_mdps[2]);
+
+    /* Validate sprintf succeeded */
+    if (len > 0 && len < UART_TX_BUFFER_SIZE) {
+        UART_Transmit(uart_tx_buffer, len);
+    } else {
+        /* sprintf failed - send error message */
+        const char *error_msg = "ERROR: sprintf failed in LSM6DSV_PrintData\r\n";
+        UART_Transmit((uint8_t*)error_msg, strlen(error_msg));
+    }
+
+    /* Print SFLP data if enabled */
+    if (sflp_enabled) {
+        memset(uart_tx_buffer, 0, UART_TX_BUFFER_SIZE);
+        len = sprintf((char*)uart_tx_buffer,
+                      "LSM6DSV_SFLP,%lu,%.4f,%.4f,%.4f,%.4f\r\n",
+                      timestamp,
+                      sflp_quat[0], sflp_quat[1], sflp_quat[2], sflp_quat[3]);
+
+        if (len > 0 && len < UART_TX_BUFFER_SIZE) {
+            UART_Transmit(uart_tx_buffer, len);
+        }
+    }
+}
 
 /* USER CODE END 0 */
 
@@ -99,12 +404,14 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C2_Init();
   MX_ICACHE_Init();
+  MX_TIM2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  /* USER CODE END 2 */
+  /* Start TIM2 for microsecond timestamps */
+  HAL_TIM_Base_Start(&htim2);
 
-  /* Initialize leds */
+  /* Initialize LEDs */
   BSP_LED_Init(LED_GREEN);
   BSP_LED_Init(LED_BLUE);
   BSP_LED_Init(LED_RED);
@@ -112,14 +419,43 @@ int main(void)
   /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
+  /* Auto-detect LSM6DSV I2C address */
+  HAL_Delay(100);  /* Wait for sensor power-up */
+
+  if (LSM6DSV_AutoDetectI2C() == 0) {
+      /* Initialize LSM6DSV sensor at detected address */
+      if (LSM6DSV_Init() == 0) {
+          BSP_LED_On(LED_GREEN);  /* Green LED = sensor OK */
+          streaming_enabled = 1;   /* Start streaming by default */
+      } else {
+          BSP_LED_On(LED_RED);    /* Red LED = sensor init error */
+          streaming_enabled = 0;
+      }
+  } else {
+      BSP_LED_On(LED_RED);    /* Red LED = sensor not found */
+      streaming_enabled = 0;
+  }
+
+  /* Start UART RX interrupt for command reception */
+  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+
+  /* USER CODE END 2 */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    BSP_LED_On(LED_RED);
-    HAL_Delay(1000);
-    BSP_LED_Off(LED_RED);
-    HAL_Delay(1000);
+    /* Read sensor data (now event-driven: prints when data ready) */
+    if (sensor_initialized) {
+        LSM6DSV_ReadData();
+        LSM6DSV_ReadSFLP();
+    }
+
+    /* Note: Data printing now happens inside LSM6DSV_ReadData() when DRDY flags are set */
+    /* This provides more accurate timing and ensures we only print valid data */
+
+    /* Process incoming commands */
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -285,6 +621,51 @@ static void MX_ICACHE_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 16-1;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 0xFFFFFFFF;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -300,7 +681,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 921600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -359,11 +740,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(VBUS_SENSE_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : INT1_Pin */
-  GPIO_InitStruct.Pin = INT1_Pin;
+  /*Configure GPIO pins : INT1_Pin INT2_Pin */
+  GPIO_InitStruct.Pin = INT1_Pin|INT2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(INT1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pin : UCPD_FLT_Pin */
   GPIO_InitStruct.Pin = UCPD_FLT_Pin;
@@ -396,6 +777,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(UCPD_DBn_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI10_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI11_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI11_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

@@ -22,6 +22,10 @@
 #include "stm32u5xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "comm_protocol.h"
+#include "sensor_manager.h"
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,9 +59,10 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-
+extern TIM_HandleTypeDef htim2;
 /* USER CODE BEGIN EV */
-
+extern UART_HandleTypeDef huart1;
+extern uint8_t uart_rx_byte;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -199,6 +204,34 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles EXTI Line10 interrupt.
+  */
+void EXTI10_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI10_IRQn 0 */
+
+  /* USER CODE END EXTI10_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(INT1_Pin);
+  /* USER CODE BEGIN EXTI10_IRQn 1 */
+
+  /* USER CODE END EXTI10_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI Line11 interrupt.
+  */
+void EXTI11_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI11_IRQn 0 */
+
+  /* USER CODE END EXTI11_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(INT2_Pin);
+  /* USER CODE BEGIN EXTI11_IRQn 1 */
+
+  /* USER CODE END EXTI11_IRQn 1 */
+}
+
+/**
   * @brief This function handles EXTI Line13 interrupt.
   */
 void EXTI13_IRQHandler(void)
@@ -212,6 +245,64 @@ void EXTI13_IRQHandler(void)
   /* USER CODE END EXTI13_IRQn 1 */
 }
 
+/**
+  * @brief This function handles GPDMA1 Channel 0 global interrupt.
+  */
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  /* USER CODE BEGIN GPDMA1_Channel0_IRQn 0 */
+
+  /* USER CODE END GPDMA1_Channel0_IRQn 0 */
+  /* USER CODE BEGIN GPDMA1_Channel0_IRQn 1 */
+
+  /* USER CODE END GPDMA1_Channel0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM2 global interrupt.
+  */
+void TIM2_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM2_IRQn 0 */
+
+  /* USER CODE END TIM2_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim2);
+  /* USER CODE BEGIN TIM2_IRQn 1 */
+
+  /* USER CODE END TIM2_IRQn 1 */
+}
+
 /* USER CODE BEGIN 1 */
+
+/**
+ * @brief  UART RX Complete Callback
+ * @note   Called when a byte is received via UART interrupt
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1) {
+        /* TODO: Command protocol not implemented yet
+        comm_protocol_rx_callback(&comm, uart_rx_byte);
+        HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+        */
+    }
+}
+
+/**
+ * @brief  GPIO EXTI Callback for LSM6DSV interrupts
+ * @note   Called when INT1 or INT2 pin from LSM6DSV triggers
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == INT1_Pin) {
+      
+    }
+
+    if (GPIO_Pin == INT2_Pin) {
+        /* INT2 triggered - can be configured for different events */
+        /* For now, just toggle LED */
+        BSP_LED_Toggle(LED_RED);
+    }
+}
 
 /* USER CODE END 1 */

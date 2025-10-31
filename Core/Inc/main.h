@@ -63,6 +63,10 @@ void Error_Handler(void);
 #define VBUS_SENSE_GPIO_Port GPIOC
 #define INT1_Pin GPIO_PIN_10
 #define INT1_GPIO_Port GPIOE
+#define INT1_EXTI_IRQn EXTI10_IRQn
+#define INT2_Pin GPIO_PIN_11
+#define INT2_GPIO_Port GPIOE
+#define INT2_EXTI_IRQn EXTI11_IRQn
 #define UCPD_FLT_Pin GPIO_PIN_14
 #define UCPD_FLT_GPIO_Port GPIOB
 #define UCPD_DBn_Pin GPIO_PIN_5
