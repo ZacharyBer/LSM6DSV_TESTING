@@ -280,11 +280,12 @@ void TIM2_IRQHandler(void)
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+    extern comm_protocol_t comm_ctx;
+    extern uint8_t uart_rx_byte;
+
     if (huart == &huart1) {
-        /* TODO: Command protocol not implemented yet
-        comm_protocol_rx_callback(&comm, uart_rx_byte);
+        comm_protocol_rx_callback(&comm_ctx, uart_rx_byte);
         HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
-        */
     }
 }
 

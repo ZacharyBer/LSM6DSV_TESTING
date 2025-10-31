@@ -251,50 +251,93 @@ sflp_enabled = 1;
 
 ## Implementation Status
 
-### ✅ Working Features
-- Real-time data streaming (100Hz)
-- Accelerometer & gyroscope reading
-- Microsecond timestamps
-- CSV format output
-- Python GUI with 3-axis plots
-- Both I2C addresses supported
-- LED status indicators
+### ✅ Fully Implemented (v2.0 - Full Integration)
+- **Real-time data streaming** at sensor ODR (configurable 7.5-960Hz)
+- **Accelerometer & gyroscope reading** with automatic unit conversion
+- **Microsecond timestamps** via TIM2
+- **CSV format output** via data_formatter layer
+- **Python GUI** with 3-axis plots and full command interface
+- **I2C auto-detection** (both 0x6A and 0x6B addresses)
+- **LED status indicators** (Green=sensor OK, Blue=data streaming, Red=error)
+- **sensor_manager.c** (~1,400 lines): Runtime configuration, SFLP support, calibration framework
+- **comm_protocol.c** (~1,050 lines): Full UART command parsing and execution
+- **data_formatter.c** (~370 lines): CSV formatting, status/config reporting
+- **UART RX interrupt handler**: Command reception in background
+- **Runtime configuration**: Change ODR, full-scale, enable SFLP via commands
+- **3-layer architecture**: Clean separation (sensor/protocol/formatter)
+- **Main.c refactored**: Uses new layers, ~30% code reduction
 
-### 🔧 Partially Implemented
-- **sensor_manager.c**: API designed, partial implementation (~200 lines), not integrated in main.c
-- **SFLP**: Code exists but not enabled (set `sflp_enabled=1` to activate)
-- **Python config panel**: UI exists but doesn't send commands to firmware
+### 🔧 Partially Implemented (Stub Functions)
+- **SFLP quaternion reading**: Can enable/disable SFLP but driver doesn't expose quaternion registers
+- **Embedded functions**: API exists with stubs (step counter, tap, free fall, wake-up, tilt, 6D)
+- **FIFO operations**: API exists with stubs
+- **Interrupt event reporting**: GPIO callbacks exist but event decoding not implemented
+- **Calibration**: Offset framework exists, self-test stubbed
 
-### ❌ Not Implemented
-- **comm_protocol.c**: Header defines protocol, implementation missing
-- **Interrupt handlers**: EXTI configured in .ioc but callbacks empty
-- **FIFO**: API designed, not implemented
-- **Embedded functions**: Step counter, tap, free fall, etc. (API exists)
-- **Data logging**: GUI doesn't save CSV files yet
-- **Runtime configuration**: No command protocol to change settings
+### ❌ Not Implemented (Python GUI Features)
+- **Data logging**: GUI doesn't save CSV files to disk yet
+- **FFT analysis**: GUI has no frequency domain analysis
+- **Calibration wizard**: No GUI-guided calibration process
+- **3D visualization**: No quaternion-based 3D orientation display
 
-## Future Development Paths
+## Architecture Overview (v2.0)
 
-### Option 1: Add Command Protocol
-1. Implement `comm_protocol.c` based on header definitions
-2. Add UART RX interrupt handler in `stm32u5xx_it.c`
-3. Parse commands in main loop
-4. Update Python GUI to send commands
-5. **Result:** Runtime configuration without reflashing
+### Implemented 3-Layer Architecture
 
-### Option 2: Enable Advanced Features
-1. Integrate `sensor_manager.c` into main.c
-2. Add interrupt handlers (EXTI10_IRQHandler, EXTI11_IRQHandler)
-3. Enable FIFO for higher throughput
-4. Activate embedded functions (step counter, tap, etc.)
-5. **Result:** Full feature LSM6DSV utilization
+```
+Python GUI (lsm6dsv_gui.py)
+    ↕ UART 921600 baud (Commands + Data)
+┌─────────────────────────────────────────┐
+│         STM32U5A5 Firmware              │
+│                                         │
+│  main.c (orchestration layer)          │
+│    ├─> comm_protocol.c                 │
+│    │     └─> Parse UART commands       │
+│    │         Execute via sensor_mgr    │
+│    │                                    │
+│    ├─> sensor_manager.c                │
+│    │     └─> Runtime configuration     │
+│    │         SFLP enable/disable        │
+│    │         Data reading               │
+│    │                                    │
+│    └─> data_formatter.c                │
+│          └─> CSV formatting             │
+│              Response messages          │
+│                                         │
+│  platform_i2c.c (HAL abstraction)      │
+│  lsm6dsv_reg.c (ST driver)             │
+└─────────────────────────────────────────┘
+    ↕ I2C 400kHz
+  LSM6DSV Sensor
 
-### Option 3: Data Logging & Analysis
-1. Add CSV file writing in Python GUI
-2. Implement FFT analysis for vibration
-3. Add calibration wizard
-4. 3D orientation visualization for quaternions
-5. **Result:** Complete data analysis tool
+```
+
+### Supported Commands (Python GUI → Firmware)
+
+**Configuration:**
+- `SET:ACC_ODR:<Hz>` - Change accelerometer ODR (7.5-960 Hz)
+- `SET:ACC_FS:<g>` - Change full scale (2, 4, 8, 16 g)
+- `SET:GYRO_ODR:<Hz>` - Change gyroscope ODR
+- `SET:GYRO_FS:<dps>` - Change full scale (125-4000 dps)
+
+**SFLP (Sensor Fusion):**
+- `ENABLE:SFLP` - Enable game rotation vector
+- `DISABLE:SFLP` - Disable sensor fusion
+- `SET:SFLP_ODR:<Hz>` - Set fusion rate (15-480 Hz)
+
+**System:**
+- `PING` - Test connectivity (responds "OK")
+- `STATUS` - Get system status
+- `GET:CONFIG` - Get current configuration
+
+### Future Enhancements
+
+1. **Complete SFLP Integration**: Add quaternion register reading when ST updates driver
+2. **Implement Embedded Functions**: Enable step counter, tap, free fall via GUI
+3. **Add Interrupt Event Reporting**: Send `INT:event_name` messages to GUI
+4. **Enable FIFO Mode**: High-speed data buffering
+5. **Python GUI Logging**: Save CSV data to files
+6. **Calibration Wizard**: GUI-guided offset calibration
 
 ## Debugging Tips
 
