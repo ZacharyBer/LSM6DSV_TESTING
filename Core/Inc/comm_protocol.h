@@ -134,7 +134,7 @@ typedef struct {
 } command_t;
 
 /* Communication protocol context */
-typedef struct {
+typedef struct comm_protocol_s {
     /* UART handle */
     UART_HandleTypeDef *huart;
 

@@ -117,6 +117,8 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
     __HAL_RCC_I2C2_CLK_ENABLE();
     /* USER CODE BEGIN I2C2_MspInit 1 */
 
+    /* NOTE: Board has external pull-up resistors, don't enable internal */
+
     /* USER CODE END I2C2_MspInit 1 */
 
   }

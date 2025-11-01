@@ -58,7 +58,8 @@ static int32_t platform_write_wrapper(void *handle, uint8_t reg, const uint8_t *
         return -1;
     }
 
-    if (HAL_I2C_Mem_Write(pctx->hi2c, pctx->address, reg, I2C_MEMADD_SIZE_8BIT,
+    /* HAL expects 7-bit address shifted left by 1 */
+    if (HAL_I2C_Mem_Write(pctx->hi2c, pctx->address << 1, reg, I2C_MEMADD_SIZE_8BIT,
                           (uint8_t*)bufp, len, pctx->timeout) != HAL_OK)
     {
         return -1;
@@ -77,7 +78,8 @@ static int32_t platform_read_wrapper(void *handle, uint8_t reg, uint8_t *bufp, u
         return -1;
     }
 
-    if (HAL_I2C_Mem_Read(pctx->hi2c, pctx->address, reg, I2C_MEMADD_SIZE_8BIT,
+    /* HAL expects 7-bit address shifted left by 1 */
+    if (HAL_I2C_Mem_Read(pctx->hi2c, pctx->address << 1, reg, I2C_MEMADD_SIZE_8BIT,
                          bufp, len, pctx->timeout) != HAL_OK)
     {
         return -1;
@@ -776,7 +778,7 @@ int32_t sensor_manager_enable_sflp(sensor_manager_t *mgr, bool enable)
  * @param  odr: SFLP output data rate
  * @retval 0 on success, -1 on error
  */
-int32_t sensor_manager_set_sflp_odr(sensor_manager_t *mgr, lsm6dsv_sflp_odr_t odr)
+int32_t sensor_manager_set_sflp_odr(sensor_manager_t *mgr, uint8_t odr)
 {
     int32_t ret;
     lsm6dsv_sflp_data_rate_t sflp_rate;

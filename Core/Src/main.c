@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
+#include <stdio.h>
 #include "sensor_manager.h"
 #include "comm_protocol.h"
 #include "data_formatter.h"
@@ -35,9 +36,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* LSM6DSV I2C Addresses */
-#define LSM6DSV_I2C_ADDR_LOW  (0x6A << 1)  // SDO/SA0 pin low (default)
-#define LSM6DSV_I2C_ADDR_HIGH (0x6B << 1)  // SDO/SA0 pin high
+/* LSM6DSV I2C Addresses (7-bit, unshifted) */
+#define LSM6DSV_I2C_ADDR_LOW  0x6A  // SDO/SA0 pin low (default)
+#define LSM6DSV_I2C_ADDR_HIGH 0x6B  // SDO/SA0 pin high
 
 /* Default I2C address - can be changed via command */
 #define LSM6DSV_I2C_ADDR_DEFAULT  LSM6DSV_I2C_ADDR_HIGH
@@ -68,11 +69,11 @@ static uint8_t streaming_enabled = 0;
 static uint8_t current_i2c_address = LSM6DSV_I2C_ADDR_DEFAULT;
 
 /* UART RX Buffer */
-static uint8_t uart_rx_byte;
+uint8_t uart_rx_byte;
 
 /* New layer instances */
 static sensor_manager_t sensor_mgr;
-static comm_protocol_t comm_ctx;
+comm_protocol_t comm_ctx;
 
 /* USER CODE END PV */
 
@@ -142,14 +143,75 @@ int main(void)
   /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
+  /* Send startup banner to confirm UART is working */
+  const char* banner = "\r\n=== LSM6DSV Firmware v2.0 ===\r\n"
+                       "UART: OK (921600 baud)\r\n"
+                       "Initializing sensor...\r\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)banner, strlen(banner), 1000);
+
   /* Wait for sensor power-up */
   HAL_Delay(100);
+
+  /* Scan I2C bus to see what devices are present */
+  char scan_msg[128];
+  int scan_len = snprintf(scan_msg, sizeof(scan_msg), "I2C Bus Scan:\r\n");
+  HAL_UART_Transmit(&huart1, (uint8_t*)scan_msg, scan_len, 1000);
+
+  for (uint8_t addr = 1; addr < 128; addr++) {
+      if (HAL_I2C_IsDeviceReady(&hi2c2, addr << 1, 1, 10) == HAL_OK) {
+          scan_len = snprintf(scan_msg, sizeof(scan_msg), "  Found device at 0x%02X\r\n", addr);
+          HAL_UART_Transmit(&huart1, (uint8_t*)scan_msg, scan_len, 1000);
+      }
+  }
+  HAL_UART_Transmit(&huart1, (uint8_t*)"I2C scan complete.\r\n\r\n", 21, 1000);
 
   /* Try both I2C addresses */
   uint8_t addresses[] = {LSM6DSV_I2C_ADDR_LOW, LSM6DSV_I2C_ADDR_HIGH};
   for (int i = 0; i < 2; i++) {
       current_i2c_address = addresses[i];
+
+      /* Report which address we're trying */
+      char probe_msg[128];
+      int msg_len = snprintf(probe_msg, sizeof(probe_msg),
+                             "Probing LSM6DSV at I2C address 0x%02X...\r\n",
+                             current_i2c_address);
+      HAL_UART_Transmit(&huart1, (uint8_t*)probe_msg, msg_len, 1000);
+
+      /* Debug: Read WHO_AM_I register directly to see what's there */
+      uint8_t whoami_test = 0;
+      HAL_StatusTypeDef whoami_status;
+      char whoami_msg[256];
+
+      whoami_status = HAL_I2C_Mem_Read(&hi2c2, current_i2c_address << 1, 0x0F,
+                                        I2C_MEMADD_SIZE_8BIT, &whoami_test, 1, 1000);
+
+      uint32_t i2c_error = HAL_I2C_GetError(&hi2c2);
+      int whoami_len = snprintf(whoami_msg, sizeof(whoami_msg),
+                                "  WHO_AM_I(0x0F): HAL_status=%d, I2C_ErrorCode=0x%04lX, value=0x%02X\r\n"
+                                "    (expect status=0, value=0x70 for LSM6DSV)\r\n",
+                                whoami_status, i2c_error, whoami_test);
+      HAL_UART_Transmit(&huart1, (uint8_t*)whoami_msg, whoami_len, 1000);
+
+      /* Decode I2C error codes */
+      if (i2c_error != HAL_I2C_ERROR_NONE) {
+          char error_detail[256];
+          int error_len = snprintf(error_detail, sizeof(error_detail),
+                                    "    I2C Errors:%s%s%s%s%s\r\n",
+                                    (i2c_error & HAL_I2C_ERROR_BERR) ? " BERR" : "",
+                                    (i2c_error & HAL_I2C_ERROR_ARLO) ? " ARLO" : "",
+                                    (i2c_error & HAL_I2C_ERROR_AF) ? " AF(NACK)" : "",
+                                    (i2c_error & HAL_I2C_ERROR_OVR) ? " OVR" : "",
+                                    (i2c_error & HAL_I2C_ERROR_TIMEOUT) ? " TIMEOUT" : "");
+          HAL_UART_Transmit(&huart1, (uint8_t*)error_detail, error_len, 1000);
+      }
+
       if (sensor_manager_init(&sensor_mgr, &hi2c2, current_i2c_address) == 0) {
+          /* Success! */
+          msg_len = snprintf(probe_msg, sizeof(probe_msg),
+                            "  Result: SUCCESS - Sensor initialized\r\n"
+                            "Starting data streaming...\r\n\r\n");
+          HAL_UART_Transmit(&huart1, (uint8_t*)probe_msg, msg_len, 1000);
+
           BSP_LED_On(LED_GREEN);
           sensor_initialized = 1;
           streaming_enabled = 1;
@@ -157,10 +219,25 @@ int main(void)
           /* Initialize comm_protocol */
           comm_protocol_init(&comm_ctx, &huart1, &sensor_mgr);
           break;
+      } else {
+          /* Failed */
+          HAL_UART_Transmit(&huart1, (uint8_t*)"  Result: FAILED - Init failed\r\n\r\n", 35, 1000);
       }
   }
 
   if (!sensor_initialized) {
+      /* Send detailed error message */
+      const char* error_msg = "\r\n*** ERROR: LSM6DSV sensor not found! ***\r\n"
+                              "Possible causes:\r\n"
+                              "  1. Sensor not connected to I2C2 (PB10=SCL, PB11=SDA)\r\n"
+                              "  2. Wrong I2C address (check SDO/SA0 pin)\r\n"
+                              "  3. Missing I2C pull-up resistors\r\n"
+                              "  4. Sensor not powered (check VDD)\r\n"
+                              "  5. I2C wiring issue\r\n\r\n"
+                              "Expected addresses: 0x6A (SDO=GND) or 0x6B (SDO=VDD)\r\n"
+                              "Check I2C scan results above.\r\n\r\n";
+      HAL_UART_Transmit(&huart1, (uint8_t*)error_msg, strlen(error_msg), 1000);
+
       BSP_LED_On(LED_RED);
       streaming_enabled = 0;
   }
@@ -169,6 +246,14 @@ int main(void)
   HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
 
   /* USER CODE END 2 */
+
+  /* Initialize leds */
+  BSP_LED_Init(LED_GREEN);
+  BSP_LED_Init(LED_BLUE);
+  BSP_LED_Init(LED_RED);
+
+  /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
+  BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -185,7 +270,7 @@ int main(void)
         if (sensor_manager_read_data(&sensor_mgr, &data) == 0) {
             /* Format as CSV */
             char buffer[256];
-            int len = data_formatter_csv_data(buffer, sizeof(buffer), &data, NULL);
+            int len = data_formatter_csv_data(buffer, sizeof(buffer), &data, NULL, NULL);
 
             if (len > 0) {
                 HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 100);
@@ -208,6 +293,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    /* Small delay to prevent excessive polling and allow sensor data to be ready
+     * At 120Hz ODR, new data available every ~8.3ms
+     * 1ms delay gives good responsiveness while preventing CPU thrashing */
+    HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }
