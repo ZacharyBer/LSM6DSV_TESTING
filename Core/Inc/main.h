@@ -47,6 +47,12 @@ typedef struct comm_protocol_s comm_protocol_t;
 /* Exported global variables for UART RX and comm protocol */
 extern uint8_t uart_rx_byte;
 extern comm_protocol_t comm_ctx;
+
+/* UART RX DMA circular buffer */
+#define UART_RX_BUFFER_SIZE 256
+extern uint8_t uart_rx_buffer[UART_RX_BUFFER_SIZE];
+extern volatile uint16_t uart_rx_write_pos;
+extern volatile uint16_t uart_rx_read_pos;
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

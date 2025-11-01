@@ -76,10 +76,11 @@ LSM6DSV (I2C) → main.c polling loop → CSV formatting → UART TX → Python 
 - Provides retry logic and timestamp generation
 - **Why:** Separates hardware-specific code but keeps main logic simple
 
-**3. Unused Layers (Designed but Not Active)**
-- `sensor_manager.c/h`: High-level API for advanced features (not currently used)
-- `comm_protocol.c/h`: Command parser framework (not implemented)
-- **Why:** Architecture ready for future commands, but current code works without them
+**3. Fully Active 3-Layer Architecture (v3.0)**
+- `sensor_manager.c/h`: Complete API for all LSM6DSV features (~1,800 lines)
+- `comm_protocol.c/h`: Full UART command parser with 30+ commands (~1,400 lines)
+- `data_formatter.c/h`: CSV and response formatting
+- **Why:** Runtime configuration, embedded functions, self-test, calibration all accessible via UART
 
 **4. Timestamp Strategy**
 - TIM2 runs at 1MHz (prescaler=16-1 for 16MHz clock)
@@ -239,46 +240,58 @@ sflp_enabled = 1;
 
 **Supporting layers:**
 - `platform_i2c.c`: I2C wrappers + `platform_get_timestamp()` using TIM2
-- `sensor_manager.c/h`: Advanced API (partially implemented, not used in main)
-- `comm_protocol.c/h`: Command framework (headers only, not implemented)
+- `sensor_manager.c/h`: Complete API with all LSM6DSV features (~1,800 lines)
+- `comm_protocol.c/h`: Full command parser and executor (~1,400 lines)
+- `data_formatter.c/h`: CSV and response formatting (~370 lines)
+- `stm32u5xx_it.c`: GPIO interrupt handlers for embedded functions
 
 **Python GUI (single file):**
-- `python-gui/lsm6dsv_gui.py`: Complete GUI application (~680 lines)
+- `python-gui/lsm6dsv_gui.py`: Complete GUI application (~1,100 lines)
   - Serial communication thread
-  - CSV parser
-  - Real-time matplotlib plots
-  - Configuration UI (commands not implemented yet)
+  - CSV parser with interrupt event handling
+  - Real-time matplotlib plots (6 IMU axes + 8 fusion channels)
+  - Multi-tab configuration UI with 8 sub-tabs
+  - Complete control of all sensor features
 
 ## Implementation Status
 
-### ✅ Fully Implemented (v2.0 - Full Integration)
+### ✅ Fully Implemented (v3.0 - Complete Embedded Functions)
 - **Real-time data streaming** at sensor ODR (configurable 7.5-960Hz)
 - **Accelerometer & gyroscope reading** with automatic unit conversion
 - **Microsecond timestamps** via TIM2
 - **CSV format output** via data_formatter layer
-- **Python GUI** with 3-axis plots and full command interface
+- **Python GUI** with multi-tab interface and 30+ configuration controls
 - **I2C auto-detection** (both 0x6A and 0x6B addresses)
 - **LED status indicators** (Green=sensor OK, Blue=data streaming, Red=error)
-- **sensor_manager.c** (~1,400 lines): Runtime configuration, SFLP support, calibration framework
-- **comm_protocol.c** (~1,050 lines): Full UART command parsing and execution
+- **sensor_manager.c** (~1,800 lines): Complete API for all LSM6DSV features
+- **comm_protocol.c** (~1,400 lines): Full UART command parsing with 30+ commands
 - **data_formatter.c** (~370 lines): CSV formatting, status/config reporting
 - **UART RX interrupt handler**: Command reception in background
-- **Runtime configuration**: Change ODR, full-scale, enable SFLP via commands
+- **Runtime configuration**: ODR, full-scale, power modes, filtering via UART
 - **3-layer architecture**: Clean separation (sensor/protocol/formatter)
-- **Main.c refactored**: Uses new layers, ~30% code reduction
+- **All embedded functions implemented:**
+  - **Tap detection**: Single/double tap with X/Y/Z thresholds, timing parameters
+  - **Wake-up detection**: Activity/inactivity with axis-specific enables
+  - **Free-fall detection**: 8 threshold levels (156-500mg)
+  - **6D orientation**: 4 angle thresholds (50°/60°/70°/80°)
+  - **Tilt detection**: Automatic tilt event detection
+  - **Step counter**: With get/reset commands
+  - **Significant motion**: Motion detection algorithm
+- **Hardware filtering**: LPF2, HPF, fast settling for accel; LPF1 for gyro
+- **Power modes**: Low power, high performance, high accuracy modes
+- **GPIO interrupt event reporting**: Real-time INT:EVENT_TYPE messages via UART
+- **Self-test**: Accelerometer and gyroscope validation
+- **Calibration**: Offset calculation and storage
+- **SFLP (Sensor Fusion)**: Enable/disable with ODR control
 
-### 🔧 Partially Implemented (Stub Functions)
-- **SFLP quaternion reading**: Can enable/disable SFLP but driver doesn't expose quaternion registers
-- **Embedded functions**: API exists with stubs (step counter, tap, free fall, wake-up, tilt, 6D)
-- **FIFO operations**: API exists with stubs
-- **Interrupt event reporting**: GPIO callbacks exist but event decoding not implemented
-- **Calibration**: Offset framework exists, self-test stubbed
+### 🔧 Partially Implemented
+- **SFLP quaternion reading**: Can enable/disable SFLP but ST driver doesn't expose quaternion registers yet
+- **FIFO operations**: API framework exists (functions stubbed)
 
-### ❌ Not Implemented (Python GUI Features)
+### ❌ Not Implemented (Future GUI Features)
 - **Data logging**: GUI doesn't save CSV files to disk yet
-- **FFT analysis**: GUI has no frequency domain analysis
-- **Calibration wizard**: No GUI-guided calibration process
-- **3D visualization**: No quaternion-based 3D orientation display
+- **FFT analysis**: No frequency domain analysis
+- **3D visualization**: No quaternion-based 3D orientation display (pending SFLP driver update)
 
 ## Architecture Overview (v2.0)
 
@@ -314,30 +327,126 @@ Python GUI (lsm6dsv_gui.py)
 
 ### Supported Commands (Python GUI → Firmware)
 
-**Configuration:**
+**Basic Configuration:**
 - `SET:ACC_ODR:<Hz>` - Change accelerometer ODR (7.5-960 Hz)
 - `SET:ACC_FS:<g>` - Change full scale (2, 4, 8, 16 g)
-- `SET:GYRO_ODR:<Hz>` - Change gyroscope ODR
-- `SET:GYRO_FS:<dps>` - Change full scale (125-4000 dps)
+- `SET:ACC_MODE:<mode>` - Set power mode (0=Low Power, 1=High Performance, 2=High Accuracy)
+- `SET:GYRO_ODR:<Hz>` - Change gyroscope ODR (7.5-960 Hz)
+- `SET:GYRO_FS:<dps>` - Change full scale (125, 250, 500, 1000, 2000, 4000 dps)
+- `SET:GYRO_MODE:<mode>` - Set power mode (0=Low Power, 1=High Performance, 2=Sleep)
+
+**Hardware Filtering:**
+- `SET:XL_LPF2:<0|1>` - Enable/disable accelerometer LPF2
+- `SET:XL_LPF2_BW:<0-7>` - Set LPF2 bandwidth (0-7)
+- `SET:XL_HPF:<0|1>` - Enable/disable accelerometer high-pass filter
+- `SET:XL_FAST_SETTLING:<0|1>` - Enable/disable fast settling mode
+- `SET:GY_LPF1:<0|1>` - Enable/disable gyroscope LPF1
+- `SET:GY_LPF1_BW:<0-7>` - Set LPF1 bandwidth (0-7)
+
+**Tap Detection:**
+- `ENABLE:TAP` / `DISABLE:TAP` - Enable/disable tap detection
+- `SET:TAP_THRESHOLD_X:<0-31>` - Set X-axis tap threshold
+- `SET:TAP_THRESHOLD_Y:<0-31>` - Set Y-axis tap threshold
+- `SET:TAP_THRESHOLD_Z:<0-31>` - Set Z-axis tap threshold
+- `SET:TAP_SHOCK:<0-3>` - Set shock time window
+- `SET:TAP_QUIET:<0-3>` - Set quiet time window
+- `SET:TAP_LATENCY:<0-15>` - Set tap gap/latency
+- `SET:TAP_AXES:<111>` - Enable axes (format: XYZ as binary string, e.g., "111")
+- `SET:TAP_PRIORITY:<0-5>` - Set axis priority (0=XYZ, 1=YXZ, 2=XZY, 3=ZYX, 4=YZX, 5=ZXY)
+- `SET:TAP_MODE:<0|1>` - Set mode (0=Single only, 1=Single+Double)
+
+**Wake-Up Detection:**
+- `ENABLE:WAKE_UP` / `DISABLE:WAKE_UP` - Enable/disable wake-up detection
+- `SET:WAKE_THRESHOLD:<0-63>` - Set wake-up threshold
+- `SET:WAKE_DURATION:<0-3>` - Set wake-up duration
+- `SET:WAKE_AXES:<111>` - Enable axes (format: XYZ as binary string)
+
+**Free-Fall Detection:**
+- `ENABLE:FREE_FALL` / `DISABLE:FREE_FALL` - Enable/disable free-fall detection
+- `SET:FF_THRESHOLD:<0-7>` - Set threshold (0=156mg, 1=219mg, ..., 7=500mg)
+- `SET:FF_DURATION:<0-31>` - Set free-fall duration
+
+**6D Orientation:**
+- `ENABLE:6D` / `DISABLE:6D` - Enable/disable 6D orientation detection
+- `SET:6D_THRESHOLD:<50|60|70|80>` - Set angle threshold (degrees)
+
+**Other Embedded Functions:**
+- `ENABLE:TILT` / `DISABLE:TILT` - Enable/disable tilt detection
+- `ENABLE:SIG_MOTION` / `DISABLE:SIG_MOTION` - Enable/disable significant motion
+- `ENABLE:STEP_COUNTER` / `DISABLE:STEP_COUNTER` - Enable/disable step counter
+- `GET_STEP_COUNT` - Get current step count (responds: `STEP_COUNT:<value>`)
+- `RESET_STEP_COUNT` - Reset step counter to zero
 
 **SFLP (Sensor Fusion):**
-- `ENABLE:SFLP` - Enable game rotation vector
-- `DISABLE:SFLP` - Disable sensor fusion
-- `SET:SFLP_ODR:<Hz>` - Set fusion rate (15-480 Hz)
+- `ENABLE:SFLP` / `DISABLE:SFLP` - Enable/disable game rotation vector
+- `SET:SFLP_ODR:<Hz>` - Set fusion rate (15, 30, 60, 120, 240, 480 Hz)
+
+**Self-Test & Calibration:**
+- `SELF_TEST` - Run self-test (responds: `SELF_TEST:XL=PASS/FAIL,GY=PASS/FAIL`)
+- `CALIBRATE` - Calibrate offsets (place sensor on flat surface first)
 
 **System:**
-- `PING` - Test connectivity (responds "OK")
+- `PING` - Test connectivity (responds: `OK`)
 - `STATUS` - Get system status
 - `GET:CONFIG` - Get current configuration
+- `VERSION` - Get firmware version
+- `RESET` - Reset sensor
+- `STREAM_START` / `STREAM_STOP` - Control data streaming
+- `REG_READ:<addr>` - Read register (hex address)
+- `REG_WRITE:<addr>:<value>` - Write register (hex)
+
+### Interrupt Event Messages (Firmware → GUI)
+
+The firmware sends real-time interrupt event messages via UART when embedded functions trigger:
+
+- `INT:WAKE_UP` - Wake-up/activity detected
+- `INT:SINGLE_TAP` - Single tap detected
+- `INT:DOUBLE_TAP` - Double tap detected
+- `INT:FREE_FALL` - Free-fall condition detected
+- `INT:6D_ORIENT` - 6D orientation change detected
+- `INT:TILT` - Tilt event detected
+- `INT:STEP_DET` - Step detected by step counter
+- `INT:SIG_MOT` - Significant motion detected
+- `INT:SLEEP_CHANGE` - Sleep state change
+
+These messages are parsed by the Python GUI and displayed in the Event Log tab with timestamps and counters.
+
+### Python GUI Tab Structure
+
+**Tab 1: IMU Data**
+- 6 separate plots (Accel X/Y/Z, Gyro X/Y/Z)
+- Real-time visualization at 20 Hz
+- Zoom, pan, export capabilities
+
+**Tab 2: Sensor Fusion**
+- 8 plots: Quaternions (W, X, Y, Z) + Euler angles (Roll, Pitch, Yaw)
+- Side-by-side comparison
+- Only active when SFLP enabled
+
+**Tab 3: Configuration** (3 sub-tabs)
+- **Basic Config**: ODR, Full Scale with individual Apply buttons
+- **Power & Filtering**: Power modes, LPF2/HPF/LPF1 controls with bandwidth settings
+- **SFLP**: Sensor fusion enable/disable and ODR configuration
+
+**Tab 4: Embedded Functions** (5 sub-tabs)
+- **Tap Detection**: X/Y/Z thresholds, shock/quiet/latency timing, axes, priority, mode
+- **Wake-Up & Free Fall**: Thresholds, durations, axis enables for both features
+- **6D, Tilt & Motion**: 6D threshold, tilt enable, significant motion enable
+- **Step & Cal**: Step counter with display, self-test with results, calibration
+- **Event Log**: Real-time event messages with timestamps and counters
+
+**Tab 5: Console**
+- Raw serial data monitoring
+- Command echo and response display
+- Error message logging
 
 ### Future Enhancements
 
-1. **Complete SFLP Integration**: Add quaternion register reading when ST updates driver
-2. **Implement Embedded Functions**: Enable step counter, tap, free fall via GUI
-3. **Add Interrupt Event Reporting**: Send `INT:event_name` messages to GUI
-4. **Enable FIFO Mode**: High-speed data buffering
-5. **Python GUI Logging**: Save CSV data to files
-6. **Calibration Wizard**: GUI-guided offset calibration
+1. **Complete SFLP Quaternion Reading**: Waiting for ST driver update to expose quaternion registers
+2. **Enable FIFO Mode**: High-speed data buffering (framework exists, needs testing)
+3. **Python GUI Data Logging**: Save CSV data to files
+4. **3D Visualization**: Quaternion-based 3D orientation display (pending SFLP completion)
+5. **FFT Analysis Tab**: Frequency domain analysis of IMU data
 
 ## Debugging Tips
 

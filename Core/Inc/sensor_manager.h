@@ -53,6 +53,14 @@ typedef struct {
     lsm6dsv_xl_mode_t xl_mode;
     lsm6dsv_gy_mode_t gy_mode;
 
+    /* Filtering configuration */
+    bool xl_lpf2_en;
+    lsm6dsv_filt_xl_lp2_bandwidth_t xl_lpf2_bw;
+    bool xl_hpf_en;
+    bool xl_fast_settling_en;
+    bool gy_lpf1_en;
+    lsm6dsv_filt_gy_lp1_bandwidth_t gy_lpf1_bw;
+
     /* FIFO configuration */
     lsm6dsv_fifo_mode_t fifo_mode;
     uint8_t fifo_watermark;
@@ -83,12 +91,25 @@ typedef struct {
     /* Thresholds */
     uint8_t wake_up_threshold;     /* LSBs - 1 LSB = FS_XL/256 */
     uint8_t wake_up_duration;      /* 1 LSB = 1/ODR_XL */
+    bool wake_up_x_en;             /* Enable wake-up detection on X axis */
+    bool wake_up_y_en;             /* Enable wake-up detection on Y axis */
+    bool wake_up_z_en;             /* Enable wake-up detection on Z axis */
     uint8_t free_fall_threshold;   /* LSBs */
     uint8_t free_fall_duration;    /* 1 LSB = 1/ODR_XL */
     uint8_t tap_threshold_x;
     uint8_t tap_threshold_y;
     uint8_t tap_threshold_z;
     uint8_t d6d_threshold;         /* 50, 60, 70, 80 degrees */
+
+    /* Tap timing parameters */
+    uint8_t tap_shock;             /* Shock time window (0-3) */
+    uint8_t tap_quiet;             /* Quiet time window (0-3) */
+    uint8_t tap_latency;           /* Tap gap/latency (0-15) */
+    bool tap_x_en;                 /* Enable tap detection on X axis */
+    bool tap_y_en;                 /* Enable tap detection on Y axis */
+    bool tap_z_en;                 /* Enable tap detection on Z axis */
+    lsm6dsv_tap_axis_priority_t tap_priority;  /* Tap axis priority */
+    lsm6dsv_tap_mode_t tap_mode;   /* Single or both single/double tap */
 } sensor_config_t;
 
 typedef struct {
@@ -164,6 +185,12 @@ int32_t sensor_manager_set_gy_odr(sensor_manager_t *mgr, lsm6dsv_data_rate_t odr
 int32_t sensor_manager_set_gy_fs(sensor_manager_t *mgr, lsm6dsv_gy_full_scale_t fs);
 int32_t sensor_manager_set_gy_mode(sensor_manager_t *mgr, lsm6dsv_gy_mode_t mode);
 
+/* Filtering configuration */
+int32_t sensor_manager_set_xl_lpf2(sensor_manager_t *mgr, bool enable, lsm6dsv_filt_xl_lp2_bandwidth_t bandwidth);
+int32_t sensor_manager_set_xl_hpf(sensor_manager_t *mgr, bool enable);
+int32_t sensor_manager_set_xl_fast_settling(sensor_manager_t *mgr, bool enable);
+int32_t sensor_manager_set_gy_lpf1(sensor_manager_t *mgr, bool enable, lsm6dsv_filt_gy_lp1_bandwidth_t bandwidth);
+
 /* FIFO operations */
 int32_t sensor_manager_fifo_enable(sensor_manager_t *mgr, lsm6dsv_fifo_mode_t mode);
 int32_t sensor_manager_fifo_disable(sensor_manager_t *mgr);
@@ -178,17 +205,24 @@ int32_t sensor_manager_reset_step_counter(sensor_manager_t *mgr);
 
 int32_t sensor_manager_enable_tap_detection(sensor_manager_t *mgr, bool enable);
 int32_t sensor_manager_set_tap_threshold(sensor_manager_t *mgr, uint8_t x, uint8_t y, uint8_t z);
+int32_t sensor_manager_set_tap_timing(sensor_manager_t *mgr, uint8_t shock, uint8_t quiet, uint8_t latency);
+int32_t sensor_manager_set_tap_axes(sensor_manager_t *mgr, bool x_en, bool y_en, bool z_en);
+int32_t sensor_manager_set_tap_priority(sensor_manager_t *mgr, lsm6dsv_tap_axis_priority_t priority);
+int32_t sensor_manager_set_tap_mode(sensor_manager_t *mgr, lsm6dsv_tap_mode_t mode);
 
 int32_t sensor_manager_enable_free_fall(sensor_manager_t *mgr, bool enable);
 int32_t sensor_manager_set_free_fall_threshold(sensor_manager_t *mgr, uint8_t threshold, uint8_t duration);
 
 int32_t sensor_manager_enable_wake_up(sensor_manager_t *mgr, bool enable);
 int32_t sensor_manager_set_wake_up_threshold(sensor_manager_t *mgr, uint8_t threshold, uint8_t duration);
+int32_t sensor_manager_set_wake_up_axes(sensor_manager_t *mgr, bool x_en, bool y_en, bool z_en);
 
 int32_t sensor_manager_enable_6d_orientation(sensor_manager_t *mgr, bool enable);
 int32_t sensor_manager_set_6d_threshold(sensor_manager_t *mgr, uint8_t threshold);
 
 int32_t sensor_manager_enable_tilt(sensor_manager_t *mgr, bool enable);
+
+int32_t sensor_manager_enable_significant_motion(sensor_manager_t *mgr, bool enable);
 
 /* SFLP (Sensor Fusion) */
 int32_t sensor_manager_enable_sflp(sensor_manager_t *mgr, bool enable);

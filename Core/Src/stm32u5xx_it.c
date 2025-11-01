@@ -26,6 +26,7 @@
 #include "sensor_manager.h"
 #include <stdio.h>
 #include <string.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -60,9 +61,12 @@
 
 /* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim2;
-/* USER CODE BEGIN EV */
+extern DMA_NodeTypeDef Node_GPDMA1_Channel0;
+extern DMA_QListTypeDef List_GPDMA1_Channel0;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel0;
 extern UART_HandleTypeDef huart1;
-extern uint8_t uart_rx_byte;
+/* USER CODE BEGIN EV */
+extern comm_protocol_t comm_ctx;  /* Communication protocol context from main */
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -246,6 +250,20 @@ void EXTI13_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles GPDMA1 Channel 0 global interrupt.
+  */
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  /* USER CODE BEGIN GPDMA1_Channel0_IRQn 0 */
+
+  /* USER CODE END GPDMA1_Channel0_IRQn 0 */
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel0);
+  /* USER CODE BEGIN GPDMA1_Channel0_IRQn 1 */
+
+  /* USER CODE END GPDMA1_Channel0_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM2 global interrupt.
   */
 void TIM2_IRQHandler(void)
@@ -259,6 +277,28 @@ void TIM2_IRQHandler(void)
   /* USER CODE END TIM2_IRQn 1 */
 }
 
+/**
+  * @brief This function handles USART1 global interrupt.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  /* Check if UART IDLE line detected */
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE)) {
+    __HAL_UART_CLEAR_IDLEFLAG(&huart1);  // Clear the IDLE flag
+
+    /* IDLE detected - update write position from DMA counter */
+    uart_rx_write_pos = UART_RX_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(&handle_GPDMA1_Channel0);
+  }
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
+}
+
 /* USER CODE BEGIN 1 */
 
 /**
@@ -267,12 +307,13 @@ void TIM2_IRQHandler(void)
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    extern comm_protocol_t comm_ctx;
-    extern uint8_t uart_rx_byte;
-
     if (huart == &huart1) {
-        comm_protocol_rx_callback(&comm_ctx, uart_rx_byte);
-        HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+        /* Buffer wrapped - DMA completed full 256-byte transfer */
+        /* Update write position (DMA wrapped to beginning) */
+        uart_rx_write_pos = UART_RX_BUFFER_SIZE;  // Wrapped, now at end
+
+        /* Toggle LED to indicate buffer wrap (useful for debugging) */
+        BSP_LED_Toggle(LED_BLUE);
     }
 }
 
@@ -282,14 +323,87 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    if (GPIO_Pin == INT1_Pin) {
-      
-    }
+    if (GPIO_Pin == INT1_Pin || GPIO_Pin == INT2_Pin) {
+        /* Read interrupt sources from sensor */
+        sensor_manager_t *mgr = comm_ctx.sensor_mgr;
 
-    if (GPIO_Pin == INT2_Pin) {
-        /* INT2 triggered - can be configured for different events */
-        /* For now, just toggle LED */
-        BSP_LED_Toggle(LED_RED);
+        if (mgr != NULL && mgr->initialized) {
+            char event_msg[64];
+            lsm6dsv_wake_up_src_t wake_src;
+            lsm6dsv_tap_src_t tap_src;
+            lsm6dsv_d6d_src_t d6d_src;
+            lsm6dsv_embedded_status_t emb_status;
+
+            /* Read wake-up source */
+            if (lsm6dsv_read_reg(&mgr->ctx, LSM6DSV_WAKE_UP_SRC, (uint8_t*)&wake_src, 1) == 0) {
+                if (wake_src.wu_ia) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:WAKE_UP\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+                if (wake_src.ff_ia) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:FREE_FALL\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+                if (wake_src.sleep_change_ia) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:SLEEP_CHANGE\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+            }
+
+            /* Read tap source */
+            if (lsm6dsv_read_reg(&mgr->ctx, LSM6DSV_TAP_SRC, (uint8_t*)&tap_src, 1) == 0) {
+                if (tap_src.single_tap) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:SINGLE_TAP\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+                if (tap_src.double_tap) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:DOUBLE_TAP\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+            }
+
+            /* Read 6D source */
+            if (lsm6dsv_read_reg(&mgr->ctx, LSM6DSV_D6D_SRC, (uint8_t*)&d6d_src, 1) == 0) {
+                if (d6d_src.d6d_ia) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:6D_ORIENT\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+            }
+
+            /* Read embedded function status */
+            if (lsm6dsv_embedded_status_get(&mgr->ctx, &emb_status) == 0) {
+                if (emb_status.step_detector) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:STEP_DET\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+                if (emb_status.tilt) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:TILT\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+                if (emb_status.sig_mot) {
+                    snprintf(event_msg, sizeof(event_msg), "INT:SIG_MOT\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t*)event_msg, strlen(event_msg), 100);
+                }
+            }
+
+            /* Toggle LED to indicate interrupt processed */
+            BSP_LED_Toggle(LED_BLUE);
+        }
+    }
+}
+
+/**
+ * @brief  UART Error Callback
+ * @note   Called when UART error occurs (framing, overrun, etc.)
+ */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1) {
+        BSP_LED_Toggle(LED_RED);  // Debug: rapid red flashing = UART error
+        /* Re-enable RX DMA after error with large circular buffer */
+        uart_rx_write_pos = 0;  // Reset positions
+        uart_rx_read_pos = 0;
+        HAL_UART_Receive_DMA(&huart1, uart_rx_buffer, UART_RX_BUFFER_SIZE);
     }
 }
 

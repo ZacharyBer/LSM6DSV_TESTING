@@ -100,7 +100,15 @@ void comm_protocol_rx_callback(comm_protocol_t *comm, uint8_t data)
             comm->cmd_buffer[comm->cmd_index] = '\0';
             comm->cmd_ready = true;
             comm->commands_received++;
+            comm->cmd_index = 0;  // Reset buffer immediately to prevent concatenation
         }
+        return;
+    }
+
+    /* Protect against buffer overwrite - reject data if command pending */
+    if (comm->cmd_ready) {
+        /* Buffer not yet processed - drop incoming data to prevent overwrite */
+        comm->errors++;
         return;
     }
 
@@ -137,6 +145,11 @@ void comm_protocol_process(comm_protocol_t *comm)
     }
 
     command_t cmd;
+
+    /* Debug: Echo received command to see exact format */
+    char echo[150];
+    int echo_len = snprintf(echo, sizeof(echo), "RX_CMD: [%s]\r\n", comm->cmd_buffer);
+    HAL_UART_Transmit(comm->huart, (uint8_t*)echo, echo_len, 10);
 
     /* Parse the command string */
     if (comm_protocol_parse_command(comm, comm->cmd_buffer, &cmd) == 0) {
@@ -277,14 +290,26 @@ int32_t comm_protocol_execute_command(comm_protocol_t *comm, const command_t *cm
             comm_protocol_send_response(comm, RESP_OK, NULL);
             break;
 
-        case CMD_GET_STEP_COUNT:
-            /* Not yet implemented */
-            comm_protocol_send_response(comm, RESP_ERROR, "Step counter not implemented");
+        case CMD_GET_STEP_COUNT: {
+            uint16_t steps = 0;
+            result = sensor_manager_get_step_count(comm->sensor_mgr, &steps);
+            if (result == 0) {
+                char response[64];
+                sprintf(response, "STEP_COUNT:%u\r\n", steps);
+                comm_protocol_send_string(comm, response);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to get step count");
+            }
             break;
+        }
 
         case CMD_RESET_STEP_COUNT:
-            /* Not yet implemented */
-            comm_protocol_send_response(comm, RESP_ERROR, "Step counter not implemented");
+            result = sensor_manager_reset_step_counter(comm->sensor_mgr);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to reset step counter");
+            }
             break;
 
         case CMD_REG_READ:
@@ -306,9 +331,29 @@ int32_t comm_protocol_execute_command(comm_protocol_t *comm, const command_t *cm
             }
             break;
 
-        case CMD_SELF_TEST:
-            /* Not yet implemented */
-            comm_protocol_send_response(comm, RESP_ERROR, "Self-test not implemented");
+        case CMD_SELF_TEST: {
+            bool xl_pass = false;
+            bool gy_pass = false;
+            result = sensor_manager_run_self_test(comm->sensor_mgr, &xl_pass, &gy_pass);
+            if (result == 0) {
+                char response[64];
+                sprintf(response, "SELF_TEST:XL=%s,GY=%s\r\n",
+                        xl_pass ? "PASS" : "FAIL",
+                        gy_pass ? "PASS" : "FAIL");
+                comm_protocol_send_string(comm, response);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Self-test failed");
+            }
+            break;
+        }
+
+        case CMD_CALIBRATE:
+            result = sensor_manager_calibrate_offsets(comm->sensor_mgr);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Calibration failed");
+            }
             break;
 
         default:
@@ -364,7 +409,7 @@ int32_t comm_protocol_send_data(comm_protocol_t *comm, const uint8_t *data, uint
         return -1;
     }
 
-    HAL_StatusTypeDef status = HAL_UART_Transmit(comm->huart, (uint8_t*)data, length, 1000);
+    HAL_StatusTypeDef status = HAL_UART_Transmit(comm->huart, (uint8_t*)data, length, 10);
     return (status == HAL_OK) ? 0 : -1;
 }
 
@@ -529,6 +574,267 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
                 comm_protocol_send_response(comm, RESP_OK, NULL);
             } else {
                 comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set 6D threshold");
+            }
+            break;
+        }
+
+        case PARAM_ACC_MODE: {
+            int mode_val = atoi(value);
+            lsm6dsv_xl_mode_t mode;
+            // Map: 0=HIGH_PERFORMANCE, 1=HIGH_ACCURACY, 3=ODR_TRIGGERED, 4=LOW_POWER_2_AVG, 5=LOW_POWER_4_AVG, 6=LOW_POWER_8_AVG, 7=NORMAL
+            switch (mode_val) {
+                case 0: mode = LSM6DSV_XL_HIGH_PERFORMANCE_MD; break;
+                case 1: mode = LSM6DSV_XL_HIGH_ACCURACY_ODR_MD; break;
+                case 3: mode = LSM6DSV_XL_ODR_TRIGGERED_MD; break;
+                case 4: mode = LSM6DSV_XL_LOW_POWER_2_AVG_MD; break;
+                case 5: mode = LSM6DSV_XL_LOW_POWER_4_AVG_MD; break;
+                case 6: mode = LSM6DSV_XL_LOW_POWER_8_AVG_MD; break;
+                case 7: mode = LSM6DSV_XL_NORMAL_MD; break;
+                default: mode = LSM6DSV_XL_HIGH_PERFORMANCE_MD; break;
+            }
+            result = sensor_manager_set_xl_mode(comm->sensor_mgr, mode);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set ACC mode");
+            }
+            break;
+        }
+
+        case PARAM_GYRO_MODE: {
+            int mode_val = atoi(value);
+            lsm6dsv_gy_mode_t mode;
+            // Map: 0=HIGH_PERFORMANCE, 1=HIGH_ACCURACY, 4=SLEEP, 5=LOW_POWER
+            switch (mode_val) {
+                case 0: mode = LSM6DSV_GY_HIGH_PERFORMANCE_MD; break;
+                case 1: mode = LSM6DSV_GY_HIGH_ACCURACY_ODR_MD; break;
+                case 4: mode = LSM6DSV_GY_SLEEP_MD; break;
+                case 5: mode = LSM6DSV_GY_LOW_POWER_MD; break;
+                default: mode = LSM6DSV_GY_HIGH_PERFORMANCE_MD; break;
+            }
+            result = sensor_manager_set_gy_mode(comm->sensor_mgr, mode);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set GYRO mode");
+            }
+            break;
+        }
+
+        case PARAM_XL_LPF2: {
+            int enable = atoi(value);
+            lsm6dsv_filt_xl_lp2_bandwidth_t bw = comm->sensor_mgr->config.xl_lpf2_bw;
+            result = sensor_manager_set_xl_lpf2(comm->sensor_mgr, enable != 0, bw);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set XL LPF2");
+            }
+            break;
+        }
+
+        case PARAM_XL_LPF2_BW: {
+            int bw_val = atoi(value);
+            lsm6dsv_filt_xl_lp2_bandwidth_t bw;
+            // Map 0-7 to bandwidth enum
+            bw = (lsm6dsv_filt_xl_lp2_bandwidth_t)(bw_val & 0x07);
+            bool enable = comm->sensor_mgr->config.xl_lpf2_en;
+            result = sensor_manager_set_xl_lpf2(comm->sensor_mgr, enable, bw);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set XL LPF2 bandwidth");
+            }
+            break;
+        }
+
+        case PARAM_XL_HPF: {
+            int enable = atoi(value);
+            result = sensor_manager_set_xl_hpf(comm->sensor_mgr, enable != 0);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set XL HPF");
+            }
+            break;
+        }
+
+        case PARAM_XL_FAST_SETTLING: {
+            int enable = atoi(value);
+            result = sensor_manager_set_xl_fast_settling(comm->sensor_mgr, enable != 0);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set XL fast settling");
+            }
+            break;
+        }
+
+        case PARAM_GY_LPF1: {
+            int enable = atoi(value);
+            lsm6dsv_filt_gy_lp1_bandwidth_t bw = comm->sensor_mgr->config.gy_lpf1_bw;
+            result = sensor_manager_set_gy_lpf1(comm->sensor_mgr, enable != 0, bw);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set GY LPF1");
+            }
+            break;
+        }
+
+        case PARAM_GY_LPF1_BW: {
+            int bw_val = atoi(value);
+            lsm6dsv_filt_gy_lp1_bandwidth_t bw;
+            // Map 0-7 to bandwidth enum
+            bw = (lsm6dsv_filt_gy_lp1_bandwidth_t)(bw_val & 0x07);
+            bool enable = comm->sensor_mgr->config.gy_lpf1_en;
+            result = sensor_manager_set_gy_lpf1(comm->sensor_mgr, enable, bw);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set GY LPF1 bandwidth");
+            }
+            break;
+        }
+
+        case PARAM_TAP_THRESHOLD_X: {
+            uint8_t x = (uint8_t)atoi(value);
+            uint8_t y = comm->sensor_mgr->config.tap_threshold_y;
+            uint8_t z = comm->sensor_mgr->config.tap_threshold_z;
+            result = sensor_manager_set_tap_threshold(comm->sensor_mgr, x, y, z);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap threshold X");
+            }
+            break;
+        }
+
+        case PARAM_TAP_THRESHOLD_Y: {
+            uint8_t x = comm->sensor_mgr->config.tap_threshold_x;
+            uint8_t y = (uint8_t)atoi(value);
+            uint8_t z = comm->sensor_mgr->config.tap_threshold_z;
+            result = sensor_manager_set_tap_threshold(comm->sensor_mgr, x, y, z);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap threshold Y");
+            }
+            break;
+        }
+
+        case PARAM_TAP_THRESHOLD_Z: {
+            uint8_t x = comm->sensor_mgr->config.tap_threshold_x;
+            uint8_t y = comm->sensor_mgr->config.tap_threshold_y;
+            uint8_t z = (uint8_t)atoi(value);
+            result = sensor_manager_set_tap_threshold(comm->sensor_mgr, x, y, z);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap threshold Z");
+            }
+            break;
+        }
+
+        case PARAM_TAP_SHOCK: {
+            uint8_t shock = (uint8_t)atoi(value);
+            uint8_t quiet = comm->sensor_mgr->config.tap_quiet;
+            uint8_t latency = comm->sensor_mgr->config.tap_latency;
+            result = sensor_manager_set_tap_timing(comm->sensor_mgr, shock, quiet, latency);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap shock");
+            }
+            break;
+        }
+
+        case PARAM_TAP_QUIET: {
+            uint8_t shock = comm->sensor_mgr->config.tap_shock;
+            uint8_t quiet = (uint8_t)atoi(value);
+            uint8_t latency = comm->sensor_mgr->config.tap_latency;
+            result = sensor_manager_set_tap_timing(comm->sensor_mgr, shock, quiet, latency);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap quiet");
+            }
+            break;
+        }
+
+        case PARAM_TAP_LATENCY: {
+            uint8_t shock = comm->sensor_mgr->config.tap_shock;
+            uint8_t quiet = comm->sensor_mgr->config.tap_quiet;
+            uint8_t latency = (uint8_t)atoi(value);
+            result = sensor_manager_set_tap_timing(comm->sensor_mgr, shock, quiet, latency);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap latency");
+            }
+            break;
+        }
+
+        case PARAM_TAP_AXES: {
+            // Value format: "111" for XYZ enabled, "100" for X only, etc.
+            bool x_en = (value[0] == '1');
+            bool y_en = (value[1] == '1');
+            bool z_en = (value[2] == '1');
+            result = sensor_manager_set_tap_axes(comm->sensor_mgr, x_en, y_en, z_en);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap axes");
+            }
+            break;
+        }
+
+        case PARAM_TAP_PRIORITY: {
+            int priority_val = atoi(value);
+            lsm6dsv_tap_axis_priority_t priority;
+            // Map: 0=XYZ, 1=YXZ, 2=XZY, 3=ZYX, 4=YZX, 5=ZXY
+            switch (priority_val) {
+                case 0: priority = LSM6DSV_XYZ; break;
+                case 1: priority = LSM6DSV_YXZ; break;
+                case 2: priority = LSM6DSV_XZY; break;
+                case 3: priority = LSM6DSV_ZYX; break;
+                case 4: priority = LSM6DSV_YZX; break;
+                case 5: priority = LSM6DSV_ZXY; break;
+                default: priority = LSM6DSV_ZYX; break;
+            }
+            result = sensor_manager_set_tap_priority(comm->sensor_mgr, priority);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap priority");
+            }
+            break;
+        }
+
+        case PARAM_TAP_MODE: {
+            int mode_val = atoi(value);
+            lsm6dsv_tap_mode_t mode;
+            // Map: 0=ONLY_SINGLE, 1=BOTH_SINGLE_DOUBLE
+            mode = (mode_val == 0) ? LSM6DSV_ONLY_SINGLE : LSM6DSV_BOTH_SINGLE_DOUBLE;
+            result = sensor_manager_set_tap_mode(comm->sensor_mgr, mode);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set tap mode");
+            }
+            break;
+        }
+
+        case PARAM_WAKE_AXES: {
+            // Value format: "111" for XYZ enabled, "100" for X only, etc.
+            bool x_en = (value[0] == '1');
+            bool y_en = (value[1] == '1');
+            bool z_en = (value[2] == '1');
+            result = sensor_manager_set_wake_up_axes(comm->sensor_mgr, x_en, y_en, z_en);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set wake axes");
             }
             break;
         }
@@ -758,9 +1064,25 @@ parameter_type_t comm_protocol_get_param_type(const char *param)
     if (strcmp(param, "SFLP_ODR") == 0) return PARAM_SFLP_ODR;
     if (strcmp(param, "WAKE_THRESHOLD") == 0) return PARAM_WAKE_THRESHOLD;
     if (strcmp(param, "WAKE_DURATION") == 0) return PARAM_WAKE_DURATION;
+    if (strcmp(param, "WAKE_AXES") == 0) return PARAM_WAKE_AXES;
     if (strcmp(param, "FF_THRESHOLD") == 0) return PARAM_FF_THRESHOLD;
     if (strcmp(param, "FF_DURATION") == 0) return PARAM_FF_DURATION;
+    if (strcmp(param, "TAP_THRESHOLD_X") == 0) return PARAM_TAP_THRESHOLD_X;
+    if (strcmp(param, "TAP_THRESHOLD_Y") == 0) return PARAM_TAP_THRESHOLD_Y;
+    if (strcmp(param, "TAP_THRESHOLD_Z") == 0) return PARAM_TAP_THRESHOLD_Z;
+    if (strcmp(param, "TAP_SHOCK") == 0) return PARAM_TAP_SHOCK;
+    if (strcmp(param, "TAP_QUIET") == 0) return PARAM_TAP_QUIET;
+    if (strcmp(param, "TAP_LATENCY") == 0) return PARAM_TAP_LATENCY;
+    if (strcmp(param, "TAP_AXES") == 0) return PARAM_TAP_AXES;
+    if (strcmp(param, "TAP_PRIORITY") == 0) return PARAM_TAP_PRIORITY;
+    if (strcmp(param, "TAP_MODE") == 0) return PARAM_TAP_MODE;
     if (strcmp(param, "6D_THRESHOLD") == 0) return PARAM_6D_THRESHOLD;
+    if (strcmp(param, "XL_LPF2") == 0) return PARAM_XL_LPF2;
+    if (strcmp(param, "XL_LPF2_BW") == 0) return PARAM_XL_LPF2_BW;
+    if (strcmp(param, "XL_HPF") == 0) return PARAM_XL_HPF;
+    if (strcmp(param, "XL_FAST_SETTLING") == 0) return PARAM_XL_FAST_SETTLING;
+    if (strcmp(param, "GY_LPF1") == 0) return PARAM_GY_LPF1;
+    if (strcmp(param, "GY_LPF1_BW") == 0) return PARAM_GY_LPF1_BW;
 
     return PARAM_UNKNOWN;
 }
@@ -1028,6 +1350,9 @@ static int32_t execute_enable(comm_protocol_t *comm, const char *param)
         case FUNC_6D_ORIENTATION:
             result = sensor_manager_enable_6d_orientation(comm->sensor_mgr, true);
             break;
+        case FUNC_SIGNIFICANT_MOTION:
+            result = sensor_manager_enable_significant_motion(comm->sensor_mgr, true);
+            break;
         default:
             comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Unknown function");
             return -1;
@@ -1084,6 +1409,9 @@ static int32_t execute_disable(comm_protocol_t *comm, const char *param)
         case FUNC_6D_ORIENTATION:
             result = sensor_manager_enable_6d_orientation(comm->sensor_mgr, false);
             break;
+        case FUNC_SIGNIFICANT_MOTION:
+            result = sensor_manager_enable_significant_motion(comm->sensor_mgr, false);
+            break;
         default:
             comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Unknown function");
             return -1;
@@ -1121,14 +1449,38 @@ static int32_t execute_get_config(comm_protocol_t *comm)
 
 /**
  * @brief  Parse ODR value (Hz) to LSM6DSV enum
- * @param  odr_hz: ODR in Hz (e.g., 7.5, 15, 30, 60, 120, 240, 480, 960)
+ * @param  odr_hz: ODR in Hz (includes standard, HA1, and HA2 modes)
  * @retval lsm6dsv_data_rate_t enum value
  */
 static lsm6dsv_data_rate_t parse_odr_value(float odr_hz)
 {
-    /* Map common ODR values to enums */
+    /* Check for High Accuracy Mode 2 (HA2) ODRs first */
+    if (odr_hz >= 12.0f && odr_hz <= 13.0f) return LSM6DSV_ODR_HA02_AT_12Hz5;    /* 12.5 Hz */
+    if (odr_hz >= 24.0f && odr_hz <= 26.0f) return LSM6DSV_ODR_HA02_AT_25Hz;     /* 25 Hz */
+    if (odr_hz >= 49.0f && odr_hz <= 51.0f) return LSM6DSV_ODR_HA02_AT_50Hz;     /* 50 Hz */
+    if (odr_hz >= 99.0f && odr_hz <= 101.0f) return LSM6DSV_ODR_HA02_AT_100Hz;   /* 100 Hz */
+    if (odr_hz >= 199.0f && odr_hz <= 201.0f) return LSM6DSV_ODR_HA02_AT_200Hz;  /* 200 Hz */
+    if (odr_hz >= 399.0f && odr_hz <= 401.0f) return LSM6DSV_ODR_HA02_AT_400Hz;  /* 400 Hz */
+    if (odr_hz >= 799.0f && odr_hz <= 801.0f) return LSM6DSV_ODR_HA02_AT_800Hz;  /* 800 Hz */
+    if (odr_hz >= 1599.0f && odr_hz <= 1601.0f) return LSM6DSV_ODR_HA02_AT_1600Hz; /* 1600 Hz */
+    if (odr_hz >= 3199.0f && odr_hz <= 3201.0f) return LSM6DSV_ODR_HA02_AT_3200Hz; /* 3200 Hz */
+    if (odr_hz >= 6399.0f && odr_hz <= 6401.0f) return LSM6DSV_ODR_HA02_AT_6400Hz; /* 6400 Hz */
+
+    /* Check for High Accuracy Mode 1 (HA1) ODRs */
+    if (odr_hz >= 15.0f && odr_hz <= 16.0f) return LSM6DSV_ODR_HA01_AT_15Hz625;  /* 15.625 Hz */
+    if (odr_hz >= 31.0f && odr_hz <= 32.0f) return LSM6DSV_ODR_HA01_AT_31Hz25;   /* 31.25 Hz */
+    if (odr_hz >= 62.0f && odr_hz <= 63.0f) return LSM6DSV_ODR_HA01_AT_62Hz5;    /* 62.5 Hz */
+    if (odr_hz >= 124.0f && odr_hz <= 126.0f) return LSM6DSV_ODR_HA01_AT_125Hz;  /* 125 Hz */
+    if (odr_hz >= 249.0f && odr_hz <= 251.0f) return LSM6DSV_ODR_HA01_AT_250Hz;  /* 250 Hz */
+    if (odr_hz >= 499.0f && odr_hz <= 501.0f) return LSM6DSV_ODR_HA01_AT_500Hz;  /* 500 Hz */
+    if (odr_hz >= 999.0f && odr_hz <= 1001.0f) return LSM6DSV_ODR_HA01_AT_1000Hz; /* 1000 Hz */
+    if (odr_hz >= 1999.0f && odr_hz <= 2001.0f) return LSM6DSV_ODR_HA01_AT_2000Hz; /* 2000 Hz */
+    if (odr_hz >= 3999.0f && odr_hz <= 4001.0f) return LSM6DSV_ODR_HA01_AT_4000Hz; /* 4000 Hz */
+    if (odr_hz >= 7999.0f && odr_hz <= 8001.0f) return LSM6DSV_ODR_HA01_AT_8000Hz; /* 8000 Hz */
+
+    /* Map standard ODR values to enums */
     if (odr_hz < 2.0f) return LSM6DSV_ODR_OFF;
-    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;
+    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;  /* 1.875 Hz */
     if (odr_hz < 11.0f) return LSM6DSV_ODR_AT_7Hz5;
     if (odr_hz < 22.0f) return LSM6DSV_ODR_AT_15Hz;
     if (odr_hz < 45.0f) return LSM6DSV_ODR_AT_30Hz;

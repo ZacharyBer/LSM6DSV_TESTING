@@ -60,6 +60,9 @@ I2C_HandleTypeDef hi2c2;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
+DMA_NodeTypeDef Node_GPDMA1_Channel0;
+DMA_QListTypeDef List_GPDMA1_Channel0;
+DMA_HandleTypeDef handle_GPDMA1_Channel0;
 
 /* USER CODE BEGIN PV */
 
@@ -68,8 +71,11 @@ static uint8_t sensor_initialized = 0;
 static uint8_t streaming_enabled = 0;
 static uint8_t current_i2c_address = LSM6DSV_I2C_ADDR_DEFAULT;
 
-/* UART RX Buffer */
-uint8_t uart_rx_byte;
+/* UART RX Circular Buffer for DMA */
+#define UART_RX_BUFFER_SIZE 256
+uint8_t uart_rx_buffer[UART_RX_BUFFER_SIZE];
+volatile uint16_t uart_rx_write_pos = 0;  // DMA write position (updated by interrupt)
+volatile uint16_t uart_rx_read_pos = 0;   // Our read position (updated by main loop)
 
 /* New layer instances */
 static sensor_manager_t sensor_mgr;
@@ -80,11 +86,12 @@ comm_protocol_t comm_ctx;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void SystemPower_Config(void);
+static void MX_GPDMA1_Init(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C2_Init(void);
-static void MX_ICACHE_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_ICACHE_Init(void);
+static void MX_I2C2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -125,11 +132,12 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
+  MX_GPDMA1_Init();
   MX_GPIO_Init();
-  MX_I2C2_Init();
-  MX_ICACHE_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
+  MX_ICACHE_Init();
+  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
 
   /* Start TIM2 for microsecond timestamps */
@@ -242,8 +250,11 @@ int main(void)
       streaming_enabled = 0;
   }
 
-  /* Start UART RX interrupt for commands */
-  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+  /* Start UART RX via DMA with large circular buffer */
+  HAL_UART_Receive_DMA(&huart1, uart_rx_buffer, UART_RX_BUFFER_SIZE);
+
+  /* Enable UART IDLE line detection to update DMA write position */
+  __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
 
   /* USER CODE END 2 */
 
@@ -259,8 +270,26 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* Process incoming UART commands */
+    /* Process UART RX circular buffer - feed bytes to protocol parser */
+    while (uart_rx_read_pos != uart_rx_write_pos) {
+        uint8_t byte = uart_rx_buffer[uart_rx_read_pos];
+        uart_rx_read_pos = (uart_rx_read_pos + 1) % UART_RX_BUFFER_SIZE;
+
+        /* Feed byte to protocol parser */
+        comm_protocol_rx_callback(&comm_ctx, byte);
+    }
+
+    /* Process any complete commands */
     comm_protocol_process(&comm_ctx);
+
+    /* Debug: Report command counter when it changes */
+    static uint32_t last_cmd_count = 0;
+    if (comm_ctx.commands_received != last_cmd_count) {
+        last_cmd_count = comm_ctx.commands_received;
+        char debug[64];
+        int debug_len = snprintf(debug, sizeof(debug), "DEBUG: CMD_COUNT=%lu\r\n", comm_ctx.commands_received);
+        HAL_UART_Transmit(&huart1, (uint8_t*)debug, debug_len, 10);
+    }
 
     /* Stream sensor data if enabled */
     if (sensor_initialized && streaming_enabled) {
@@ -273,8 +302,7 @@ int main(void)
             int len = data_formatter_csv_data(buffer, sizeof(buffer), &data, NULL, NULL);
 
             if (len > 0) {
-                HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 100);
-                BSP_LED_Toggle(LED_BLUE);
+                HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 10);
             }
 
             /* Read SFLP if enabled */
@@ -283,7 +311,7 @@ int main(void)
                 if (sensor_manager_read_sflp(&sensor_mgr, &sflp) == 0) {
                     len = data_formatter_csv_sflp(buffer, sizeof(buffer), &sflp, data.timestamp);
                     if (len > 0) {
-                        HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 100);
+                        HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 10);
                     }
                 }
             }
@@ -380,6 +408,34 @@ static void SystemPower_Config(void)
 }
 
 /**
+  * @brief GPDMA1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPDMA1_Init(void)
+{
+
+  /* USER CODE BEGIN GPDMA1_Init 0 */
+
+  /* USER CODE END GPDMA1_Init 0 */
+
+  /* Peripheral clock enable */
+  __HAL_RCC_GPDMA1_CLK_ENABLE();
+
+  /* GPDMA1 interrupt Init */
+    HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+
+  /* USER CODE BEGIN GPDMA1_Init 1 */
+
+  /* USER CODE END GPDMA1_Init 1 */
+  /* USER CODE BEGIN GPDMA1_Init 2 */
+
+  /* USER CODE END GPDMA1_Init 2 */
+
+}
+
+/**
   * @brief I2C2 Initialization Function
   * @param None
   * @retval None
@@ -395,7 +451,7 @@ static void MX_I2C2_Init(void)
 
   /* USER CODE END I2C2_Init 1 */
   hi2c2.Instance = I2C2;
-  hi2c2.Init.Timing = 0x0010061A;
+  hi2c2.Init.Timing = 0x00303D5B;
   hi2c2.Init.OwnAddress1 = 0;
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
