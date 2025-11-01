@@ -51,11 +51,17 @@ int32_t data_formatter_init(format_config_t *config)
  * @param  config: Format configuration (NULL for default)
  * @retval Number of characters written, or -1 on error
  */
-int32_t data_formatter_csv_data(char *buffer, uint16_t size, const sensor_data_t *data, const format_config_t *config)
+int32_t data_formatter_csv_data(char *buffer, size_t size,
+                                const sensor_data_t *sensor_data,
+                                const sflp_data_t *sflp_data,
+                                const format_config_t *config)
 {
-    if (buffer == NULL || data == NULL || size == 0) {
+    if (buffer == NULL || sensor_data == NULL || size == 0) {
         return -1;
     }
+
+    /* Suppress unused parameter warning */
+    (void)sflp_data;
 
     const format_config_t *cfg = (config != NULL) ? config : &default_config;
     int len = 0;
@@ -66,36 +72,36 @@ int32_t data_formatter_csv_data(char *buffer, uint16_t size, const sensor_data_t
 
     /* Add timestamp if configured */
     if (cfg->include_timestamp) {
-        len += snprintf(buffer + len, size - len, ",%lu", data->timestamp);
+        len += snprintf(buffer + len, size - len, ",%lu", sensor_data->timestamp);
     }
 
     /* Add accelerometer data */
     if (cfg->include_acc) {
-        format_float(temp, data->acc_x, cfg->decimal_places);
+        format_float(temp, sensor_data->acc_x, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, data->acc_y, cfg->decimal_places);
+        format_float(temp, sensor_data->acc_y, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, data->acc_z, cfg->decimal_places);
+        format_float(temp, sensor_data->acc_z, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
     }
 
     /* Add gyroscope data */
     if (cfg->include_gyro) {
-        format_float(temp, data->gyro_x, cfg->decimal_places);
+        format_float(temp, sensor_data->gyro_x, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, data->gyro_y, cfg->decimal_places);
+        format_float(temp, sensor_data->gyro_y, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, data->gyro_z, cfg->decimal_places);
+        format_float(temp, sensor_data->gyro_z, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
     }
 
     /* Add temperature if configured */
     if (cfg->include_temperature) {
-        format_float(temp, data->temp, cfg->decimal_places);
+        format_float(temp, sensor_data->temp, cfg->decimal_places);
         len += snprintf(buffer + len, size - len, ",%s", temp);
     }
 
@@ -158,34 +164,34 @@ int32_t data_formatter_interrupt_event(char *buffer, uint16_t size, interrupt_ev
     const char *event_name;
 
     switch (event) {
-        case INT_WAKE_UP:
+        case INT_EVENT_WAKE_UP:
             event_name = "WAKE_UP";
             break;
-        case INT_FREE_FALL:
+        case INT_EVENT_FREE_FALL:
             event_name = "FREE_FALL";
             break;
-        case INT_SINGLE_TAP:
+        case INT_EVENT_SINGLE_TAP:
             event_name = "SINGLE_TAP";
             break;
-        case INT_DOUBLE_TAP:
+        case INT_EVENT_DOUBLE_TAP:
             event_name = "DOUBLE_TAP";
             break;
-        case INT_6D_ORIENTATION:
+        case INT_EVENT_6D_ORIENTATION:
             event_name = "6D_ORIENTATION";
             break;
-        case INT_TILT:
+        case INT_EVENT_TILT:
             event_name = "TILT";
             break;
-        case INT_SIGNIFICANT_MOTION:
+        case INT_EVENT_SIGNIFICANT_MOTION:
             event_name = "SIGNIFICANT_MOTION";
             break;
-        case INT_STEP_DETECTED:
+        case INT_EVENT_STEP_DETECTED:
             event_name = "STEP_DETECTED";
             break;
-        case INT_FIFO_FULL:
+        case INT_EVENT_FIFO_FULL:
             event_name = "FIFO_FULL";
             break;
-        case INT_FIFO_WATERMARK:
+        case INT_EVENT_FIFO_WATERMARK:
             event_name = "FIFO_WATERMARK";
             break;
         default:

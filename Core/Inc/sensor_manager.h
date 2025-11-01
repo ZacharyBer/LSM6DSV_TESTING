@@ -76,7 +76,9 @@ typedef struct {
 
     /* SFLP */
     bool sflp_game_en;
-    lsm6dsv_sflp_odr_t sflp_odr;
+    uint8_t sflp_odr;  /* SFLP ODR value (changed from struct to integer) */
+    bool sflp_enabled;
+    bool streaming_enabled;
 
     /* Thresholds */
     uint8_t wake_up_threshold;     /* LSBs - 1 LSB = FS_XL/256 */
@@ -190,7 +192,7 @@ int32_t sensor_manager_enable_tilt(sensor_manager_t *mgr, bool enable);
 
 /* SFLP (Sensor Fusion) */
 int32_t sensor_manager_enable_sflp(sensor_manager_t *mgr, bool enable);
-int32_t sensor_manager_set_sflp_odr(sensor_manager_t *mgr, lsm6dsv_sflp_odr_t odr);
+int32_t sensor_manager_set_sflp_odr(sensor_manager_t *mgr, uint8_t odr);
 
 /* Interrupt configuration */
 int32_t sensor_manager_config_int1(sensor_manager_t *mgr, bool drdy_xl, bool drdy_gy);

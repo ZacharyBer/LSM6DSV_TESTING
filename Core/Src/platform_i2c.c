@@ -10,7 +10,6 @@
 #include <string.h>
 
 /* Private variables ---------------------------------------------------------*/
-static uint32_t timestamp_counter = 0;
 
 /* Function implementations --------------------------------------------------*/
 
@@ -34,7 +33,8 @@ int32_t platform_read(void *handle, uint8_t reg, uint8_t *data, uint16_t len)
 
     /* Perform I2C read with retry mechanism */
     do {
-        status = HAL_I2C_Mem_Read(pctx->hi2c, pctx->address, reg,
+        /* HAL expects 7-bit address shifted left by 1 */
+        status = HAL_I2C_Mem_Read(pctx->hi2c, pctx->address << 1, reg,
                                   I2C_MEMADD_SIZE_8BIT, data, len,
                                   pctx->timeout);
         if (status == HAL_OK) {
@@ -76,7 +76,8 @@ int32_t platform_write(void *handle, uint8_t reg, const uint8_t *data, uint16_t 
 
     /* Perform I2C write with retry mechanism */
     do {
-        status = HAL_I2C_Mem_Write(pctx->hi2c, pctx->address, reg,
+        /* HAL expects 7-bit address shifted left by 1 */
+        status = HAL_I2C_Mem_Write(pctx->hi2c, pctx->address << 1, reg,
                                    I2C_MEMADD_SIZE_8BIT, (uint8_t *)data, len,
                                    pctx->timeout);
         if (status == HAL_OK) {
@@ -123,7 +124,7 @@ uint32_t platform_get_timestamp(void)
   * @brief  Initialize platform context
   * @param  pctx     Platform context
   * @param  hi2c     I2C handle
-  * @param  address  I2C device address (7-bit left-aligned)
+  * @param  address  I2C device address (7-bit, unshifted)
   * @retval 0 if success, non-zero otherwise
   */
 int32_t platform_init(platform_ctx_t *pctx, I2C_HandleTypeDef *hi2c, uint8_t address)
@@ -153,7 +154,8 @@ int32_t platform_i2c_check(platform_ctx_t *pctx)
     }
 
     /* Check if device is ready on I2C bus */
-    status = HAL_I2C_IsDeviceReady(pctx->hi2c, pctx->address, 3, pctx->timeout);
+    /* HAL expects 7-bit address shifted left by 1 */
+    status = HAL_I2C_IsDeviceReady(pctx->hi2c, pctx->address << 1, 3, pctx->timeout);
 
     return (status == HAL_OK) ? 0 : -1;
 }

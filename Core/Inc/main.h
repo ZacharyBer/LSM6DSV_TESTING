@@ -38,12 +38,15 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-
+/* Forward declarations */
+typedef struct comm_protocol_s comm_protocol_t;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-
+/* Exported global variables for UART RX and comm protocol */
+extern uint8_t uart_rx_byte;
+extern comm_protocol_t comm_ctx;
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
