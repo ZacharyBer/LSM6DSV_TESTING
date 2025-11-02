@@ -22,6 +22,21 @@ extern "C" {
 #define SENSOR_DATA_BUFFER_SIZE     512
 #define FIFO_BUFFER_SIZE           512
 
+/* Data validity status codes */
+typedef enum {
+    SENSOR_STATUS_DISABLED = 0,  /* Sensor is powered off (ODR = OFF) */
+    SENSOR_STATUS_VALID = 1,     /* Data is valid and ready */
+    SENSOR_STATUS_ERROR = 2      /* Error reading sensor data */
+} sensor_status_t;
+
+/* Error codes for detailed diagnostics */
+typedef enum {
+    SENSOR_ERROR_NONE = 0,          /* No error */
+    SENSOR_ERROR_NOT_READY = 1,     /* Data ready flag not set */
+    SENSOR_ERROR_I2C_FAIL = 2,      /* I2C communication failure */
+    SENSOR_ERROR_INVALID_DATA = 3   /* Invalid/zero data detected */
+} sensor_error_t;
+
 /* Sensor Data Structures ----------------------------------------------------*/
 typedef struct {
     float acc_x;    /* Acceleration X in mg */
@@ -32,6 +47,11 @@ typedef struct {
     float gyro_z;   /* Angular rate Z in mdps */
     float temp;     /* Temperature in Celsius */
     uint32_t timestamp; /* Timestamp in microseconds */
+
+    /* Status and validity fields (v3.1 - Error handling & flexible config) */
+    uint8_t acc_valid;   /* Accelerometer status: 0=disabled, 1=valid, 2=error */
+    uint8_t gyro_valid;  /* Gyroscope status: 0=disabled, 1=valid, 2=error */
+    uint8_t error_code;  /* Error details: 0=none, 1=not_ready, 2=i2c_fail, 3=invalid_data */
 } sensor_data_t;
 
 typedef struct {
@@ -110,6 +130,12 @@ typedef struct {
     bool tap_z_en;                 /* Enable tap detection on Z axis */
     lsm6dsv_tap_axis_priority_t tap_priority;  /* Tap axis priority */
     lsm6dsv_tap_mode_t tap_mode;   /* Single or both single/double tap */
+
+    /* Hardware offset configuration */
+    float xl_offset_x;             /* X-axis offset in mg (±15.875mg) */
+    float xl_offset_y;             /* Y-axis offset in mg (±15.875mg) */
+    float xl_offset_z;             /* Z-axis offset in mg (±15.875mg) */
+    bool xl_offset_en;             /* Enable hardware offset application */
 } sensor_config_t;
 
 typedef struct {
@@ -235,8 +261,14 @@ int32_t sensor_manager_get_interrupt_source(sensor_manager_t *mgr, interrupt_eve
 
 /* Self-test and calibration */
 int32_t sensor_manager_run_self_test(sensor_manager_t *mgr, bool *xl_pass, bool *gy_pass);
-int32_t sensor_manager_calibrate_offsets(sensor_manager_t *mgr);
+int32_t sensor_manager_calibrate_offsets(sensor_manager_t *mgr, uint32_t duration_sec,
+                                          float *acc_offset_out, float *gyro_offset_out);
 int32_t sensor_manager_apply_offsets(sensor_manager_t *mgr, bool enable);
+
+/* Hardware offset configuration */
+int32_t sensor_manager_set_xl_offset_hw(sensor_manager_t *mgr, uint8_t axis, float offset_mg);
+int32_t sensor_manager_get_xl_offset_hw(sensor_manager_t *mgr, uint8_t axis, float *offset_mg);
+int32_t sensor_manager_enable_xl_offset_hw(sensor_manager_t *mgr, bool enable);
 
 /* Direct register access */
 int32_t sensor_manager_read_register(sensor_manager_t *mgr, uint8_t reg, uint8_t *value);

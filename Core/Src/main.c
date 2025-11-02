@@ -295,9 +295,18 @@ int main(void)
     if (sensor_initialized && streaming_enabled) {
         sensor_data_t data;
 
-        /* Read sensor data */
-        if (sensor_manager_read_data(&sensor_mgr, &data) == 0) {
-            /* Format as CSV */
+        /* Read sensor data (v3.1: always succeeds, check validity flags) */
+        sensor_manager_read_data(&sensor_mgr, &data);
+
+        /* Transmit if at least one sensor has valid data
+         * - acc_valid==1 OR gyro_valid==1: at least one sensor working
+         * - Drop samples only if BOTH sensors are error/disabled (neither is valid)
+         * - This supports acc-only, gyro-only, and both configurations */
+        bool has_valid_data = (data.acc_valid == SENSOR_STATUS_VALID) ||
+                              (data.gyro_valid == SENSOR_STATUS_VALID);
+
+        if (has_valid_data) {
+            /* Format as CSV with validity flags */
             char buffer[256];
             int len = data_formatter_csv_data(buffer, sizeof(buffer), &data, NULL, NULL);
 
@@ -316,6 +325,7 @@ int main(void)
                 }
             }
         }
+        /* If no valid data (both sensors error/disabled), drop this sample silently */
     }
 
     /* USER CODE END WHILE */

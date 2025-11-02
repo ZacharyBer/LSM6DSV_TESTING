@@ -63,6 +63,7 @@ class LSM6DSV_GUI:
         self.sample_count = 0
         self.parse_error_count = 0
         self.empty_field_count = 0
+        self.sensor_error_count = 0  # v3.1: Track sensor data errors
         self.start_time = time.time()
         self.last_update = time.time()
 
@@ -82,8 +83,31 @@ class LSM6DSV_GUI:
             'DATA_READY': 0
         }
 
+        # Device configuration (from GET:CONFIG response)
+        self.device_config = None
+
+        # Last valid (non-zero) ODR values for restore on re-enable
+        self.last_acc_odr = "120 Hz"
+        self.last_gyro_odr = "120 Hz"
+
+        # Last valid (non-Power Down) Mode values for restore on re-enable
+        self.last_acc_mode = "High Performance"
+        self.last_gyro_mode = "High Performance"
+
+        # Flags to prevent infinite loops during programmatic updates
+        self.updating_acc_controls = False
+        self.updating_gyro_controls = False
+
         # Create GUI
         self.create_widgets()
+
+        # Add trace callbacks for ODR dropdowns (after widgets are created)
+        self.acc_odr_var.trace_add('write', self.on_acc_odr_changed)
+        self.gyro_odr_var.trace_add('write', self.on_gyro_odr_changed)
+
+        # Add trace callbacks for Mode dropdowns
+        self.acc_mode_var.trace_add('write', self.on_acc_mode_changed)
+        self.gyro_mode_var.trace_add('write', self.on_gyro_mode_changed)
 
         # Start update loop
         self.update_data()
@@ -117,6 +141,62 @@ class LSM6DSV_GUI:
 
         # Convert to degrees
         return np.degrees(roll), np.degrees(pitch), np.degrees(yaw)
+
+    # ===== Configuration Enum Mapping Functions =====
+
+    def map_odr_to_string(self, odr_enum):
+        """Convert ODR enum value to string (e.g., 5 -> '120 Hz')
+
+        Note: Keys match the actual enum decimal values from lsm6dsv_reg.h
+        - Standard ODRs: 0x0-0xC (0-12 decimal)
+        - HA1 ODRs: 0x13-0x1C (19-28 decimal)
+        - HA2 ODRs: 0x23-0x2C (35-44 decimal)
+        """
+        odr_map = {
+            # Standard ODRs (0x0-0xC)
+            0: "Power Down", 1: "1.875 Hz", 2: "7.5 Hz", 3: "15 Hz", 4: "30 Hz",
+            5: "60 Hz", 6: "120 Hz", 7: "240 Hz", 8: "480 Hz", 9: "960 Hz",
+            10: "1920 Hz", 11: "3840 Hz", 12: "7680 Hz",
+            # HA1 ODRs (0x13-0x1C = 19-28 decimal)
+            19: "15.625 Hz (HA1)", 20: "31.25 Hz (HA1)", 21: "62.5 Hz (HA1)",
+            22: "125 Hz (HA1)", 23: "250 Hz (HA1)", 24: "500 Hz (HA1)",
+            25: "1000 Hz (HA1)", 26: "2000 Hz (HA1)", 27: "4000 Hz (HA1)", 28: "8000 Hz (HA1)",
+            # HA2 ODRs (0x23-0x2C = 35-44 decimal)
+            35: "12.5 Hz (HA2)", 36: "25 Hz (HA2)", 37: "50 Hz (HA2)",
+            38: "100 Hz (HA2)", 39: "200 Hz (HA2)", 40: "400 Hz (HA2)",
+            41: "800 Hz (HA2)", 42: "1600 Hz (HA2)", 43: "3200 Hz (HA2)", 44: "6400 Hz (HA2)"
+        }
+        return odr_map.get(odr_enum, f"Unknown ({odr_enum})")
+
+    def map_xl_fs_to_string(self, fs_enum):
+        """Convert accelerometer full scale enum to string"""
+        fs_map = {0: "±2g", 1: "±4g", 2: "±8g", 3: "±16g"}
+        return fs_map.get(fs_enum, f"Unknown ({fs_enum})")
+
+    def map_gy_fs_to_string(self, fs_enum):
+        """Convert gyroscope full scale enum to string"""
+        fs_map = {0: "±125 dps", 1: "±250 dps", 2: "±500 dps",
+                  3: "±1000 dps", 4: "±2000 dps", 5: "±4000 dps"}
+        return fs_map.get(fs_enum, f"Unknown ({fs_enum})")
+
+    def map_xl_mode_to_string(self, mode_enum):
+        """Convert accelerometer mode enum to string"""
+        mode_map = {
+            0: "High Performance", 1: "High Accuracy", 3: "ODR Triggered",
+            4: "Low Power (2-avg)", 5: "Low Power (4-avg)",
+            6: "Low Power (8-avg)", 7: "Normal"
+        }
+        return mode_map.get(mode_enum, f"Unknown ({mode_enum})")
+
+    def map_gy_mode_to_string(self, mode_enum):
+        """Convert gyroscope mode enum to string"""
+        mode_map = {0: "High Performance", 1: "High Accuracy",
+                    4: "Sleep", 5: "Low Power"}
+        return mode_map.get(mode_enum, f"Unknown ({mode_enum})")
+
+    def map_sflp_odr_to_string(self, odr_value):
+        """Convert SFLP ODR value to string"""
+        return f"{odr_value} Hz"
 
     def decimate_data(self, time_array, data_array, max_points=10000):
         """
@@ -389,59 +469,83 @@ class LSM6DSV_GUI:
         accel_basic_group = ttk.LabelFrame(config_frame, text="Accelerometer", padding="10")
         accel_basic_group.grid(row=0, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        ttk.Label(accel_basic_group, text="ODR:").grid(row=0, column=0, sticky=tk.W, pady=3)
+        # Accelerometer Enable checkbox
+        self.acc_enabled_var = tk.BooleanVar(value=True)  # Start enabled
+        ttk.Checkbutton(accel_basic_group, text="Enable Accelerometer",
+                       variable=self.acc_enabled_var,
+                       command=self.toggle_accelerometer).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(accel_basic_group, text="ODR:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.acc_odr_var = tk.StringVar(value="120 Hz")
         ttk.Combobox(accel_basic_group, textvariable=self.acc_odr_var,
-                     values=["1.875 Hz", "7.5 Hz", "15 Hz", "30 Hz", "60 Hz", "120 Hz",
+                     values=["Power Down (0 Hz)", "1.875 Hz", "7.5 Hz", "15 Hz", "30 Hz", "60 Hz", "120 Hz",
                              "240 Hz", "480 Hz", "960 Hz", "1920 Hz", "3840 Hz", "7680 Hz",
                              "15.625 Hz (HA1)", "31.25 Hz (HA1)", "62.5 Hz (HA1)", "125 Hz (HA1)",
                              "250 Hz (HA1)", "500 Hz (HA1)", "1000 Hz (HA1)", "2000 Hz (HA1)",
                              "4000 Hz (HA1)", "8000 Hz (HA1)", "12.5 Hz (HA2)", "25 Hz (HA2)",
                              "50 Hz (HA2)", "100 Hz (HA2)", "200 Hz (HA2)", "400 Hz (HA2)",
                              "800 Hz (HA2)", "1600 Hz (HA2)", "3200 Hz (HA2)", "6400 Hz (HA2)"],
-                     width=18, state="readonly").grid(row=0, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.acc_odr_status = ttk.Label(accel_basic_group, text="Device: ---", foreground="gray")
+        self.acc_odr_status.grid(row=1, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
-        ttk.Label(accel_basic_group, text="Full Scale:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Label(accel_basic_group, text="Full Scale:").grid(row=2, column=0, sticky=tk.W, pady=3)
         self.acc_fs_var = tk.StringVar(value="±4g")
         ttk.Combobox(accel_basic_group, textvariable=self.acc_fs_var,
                      values=["±2g", "±4g", "±8g", "±16g"],
-                     width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     width=18, state="readonly").grid(row=2, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.acc_fs_status = ttk.Label(accel_basic_group, text="Device: ---", foreground="gray")
+        self.acc_fs_status.grid(row=2, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
-        ttk.Label(accel_basic_group, text="Mode:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(accel_basic_group, text="Mode:").grid(row=3, column=0, sticky=tk.W, pady=3)
         self.acc_mode_var = tk.StringVar(value="High Performance")
         ttk.Combobox(accel_basic_group, textvariable=self.acc_mode_var,
-                     values=["High Performance", "High Accuracy", "ODR Triggered",
+                     values=["Power Down", "High Performance", "High Accuracy", "ODR Triggered",
                              "Low Power (2-avg)", "Low Power (4-avg)", "Low Power (8-avg)", "Normal"],
-                     width=18, state="readonly").grid(row=2, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     width=18, state="readonly").grid(row=3, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.acc_mode_status = ttk.Label(accel_basic_group, text="Device: ---", foreground="gray")
+        self.acc_mode_status.grid(row=3, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         # --- Panel 2: Gyroscope Basic (Row 0, Col 1) ---
         gyro_basic_group = ttk.LabelFrame(config_frame, text="Gyroscope", padding="10")
         gyro_basic_group.grid(row=0, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        ttk.Label(gyro_basic_group, text="ODR:").grid(row=0, column=0, sticky=tk.W, pady=3)
+        # Gyroscope Enable checkbox
+        self.gyro_enabled_var = tk.BooleanVar(value=True)  # Start enabled
+        ttk.Checkbutton(gyro_basic_group, text="Enable Gyroscope",
+                       variable=self.gyro_enabled_var,
+                       command=self.toggle_gyroscope).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(gyro_basic_group, text="ODR:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.gyro_odr_var = tk.StringVar(value="120 Hz")
         ttk.Combobox(gyro_basic_group, textvariable=self.gyro_odr_var,
-                     values=["1.875 Hz", "7.5 Hz", "15 Hz", "30 Hz", "60 Hz", "120 Hz",
+                     values=["Power Down (0 Hz)", "1.875 Hz", "7.5 Hz", "15 Hz", "30 Hz", "60 Hz", "120 Hz",
                              "240 Hz", "480 Hz", "960 Hz", "1920 Hz", "3840 Hz", "7680 Hz",
                              "15.625 Hz (HA1)", "31.25 Hz (HA1)", "62.5 Hz (HA1)", "125 Hz (HA1)",
                              "250 Hz (HA1)", "500 Hz (HA1)", "1000 Hz (HA1)", "2000 Hz (HA1)",
                              "4000 Hz (HA1)", "8000 Hz (HA1)", "12.5 Hz (HA2)", "25 Hz (HA2)",
                              "50 Hz (HA2)", "100 Hz (HA2)", "200 Hz (HA2)", "400 Hz (HA2)",
                              "800 Hz (HA2)", "1600 Hz (HA2)", "3200 Hz (HA2)", "6400 Hz (HA2)"],
-                     width=18, state="readonly").grid(row=0, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.gyro_odr_status = ttk.Label(gyro_basic_group, text="Device: ---", foreground="gray")
+        self.gyro_odr_status.grid(row=1, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
-        ttk.Label(gyro_basic_group, text="Full Scale:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Label(gyro_basic_group, text="Full Scale:").grid(row=2, column=0, sticky=tk.W, pady=3)
         self.gyro_fs_var = tk.StringVar(value="±2000 dps")
         ttk.Combobox(gyro_basic_group, textvariable=self.gyro_fs_var,
                      values=["±125 dps", "±250 dps", "±500 dps",
                              "±1000 dps", "±2000 dps", "±4000 dps"],
-                     width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     width=18, state="readonly").grid(row=2, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.gyro_fs_status = ttk.Label(gyro_basic_group, text="Device: ---", foreground="gray")
+        self.gyro_fs_status.grid(row=2, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
-        ttk.Label(gyro_basic_group, text="Mode:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(gyro_basic_group, text="Mode:").grid(row=3, column=0, sticky=tk.W, pady=3)
         self.gyro_mode_var = tk.StringVar(value="High Performance")
         ttk.Combobox(gyro_basic_group, textvariable=self.gyro_mode_var,
-                     values=["High Performance", "High Accuracy", "Sleep", "Low Power"],
-                     width=18, state="readonly").grid(row=2, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+                     values=["Power Down", "High Performance", "High Accuracy", "Sleep", "Low Power"],
+                     width=18, state="readonly").grid(row=3, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.gyro_mode_status = ttk.Label(gyro_basic_group, text="Device: ---", foreground="gray")
+        self.gyro_mode_status.grid(row=3, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         # --- Panel 3: Accelerometer Filtering (Row 1, Col 0) ---
         accel_filter_group = ttk.LabelFrame(config_frame, text="Accelerometer Filtering", padding="10")
@@ -449,21 +553,29 @@ class LSM6DSV_GUI:
 
         self.xl_lpf2_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(accel_filter_group, text="LPF2 Enable",
-                        variable=self.xl_lpf2_var).grid(row=0, column=0, sticky=tk.W, pady=3, columnspan=2)
+                        variable=self.xl_lpf2_var).grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.xl_lpf2_status = ttk.Label(accel_filter_group, text="Device: ---", foreground="gray")
+        self.xl_lpf2_status.grid(row=0, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         ttk.Label(accel_filter_group, text="LPF2 Bandwidth:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.xl_lpf2_bw_var = tk.StringVar(value="0")
         ttk.Combobox(accel_filter_group, textvariable=self.xl_lpf2_bw_var,
                      values=["0", "1", "2", "3", "4", "5", "6", "7"],
                      width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.xl_lpf2_bw_status = ttk.Label(accel_filter_group, text="Device: ---", foreground="gray")
+        self.xl_lpf2_bw_status.grid(row=1, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         self.xl_hpf_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(accel_filter_group, text="HPF Enable",
-                        variable=self.xl_hpf_var).grid(row=2, column=0, sticky=tk.W, pady=3, columnspan=2)
+                        variable=self.xl_hpf_var).grid(row=2, column=0, sticky=tk.W, pady=3)
+        self.xl_hpf_status = ttk.Label(accel_filter_group, text="Device: ---", foreground="gray")
+        self.xl_hpf_status.grid(row=2, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         self.xl_fast_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(accel_filter_group, text="Fast Settling",
-                        variable=self.xl_fast_var).grid(row=3, column=0, sticky=tk.W, pady=3, columnspan=2)
+                        variable=self.xl_fast_var).grid(row=3, column=0, sticky=tk.W, pady=3)
+        self.xl_fast_status = ttk.Label(accel_filter_group, text="Device: ---", foreground="gray")
+        self.xl_fast_status.grid(row=3, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         # --- Panel 4: Gyroscope Filtering (Row 1, Col 1) ---
         gyro_filter_group = ttk.LabelFrame(config_frame, text="Gyroscope Filtering", padding="10")
@@ -471,13 +583,17 @@ class LSM6DSV_GUI:
 
         self.gy_lpf1_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(gyro_filter_group, text="LPF1 Enable",
-                        variable=self.gy_lpf1_var).grid(row=0, column=0, sticky=tk.W, pady=3, columnspan=2)
+                        variable=self.gy_lpf1_var).grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.gy_lpf1_status = ttk.Label(gyro_filter_group, text="Device: ---", foreground="gray")
+        self.gy_lpf1_status.grid(row=0, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         ttk.Label(gyro_filter_group, text="LPF1 Bandwidth:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.gy_lpf1_bw_var = tk.StringVar(value="0")
         ttk.Combobox(gyro_filter_group, textvariable=self.gy_lpf1_bw_var,
                      values=["0", "1", "2", "3", "4", "5", "6", "7"],
                      width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.gy_lpf1_bw_status = ttk.Label(gyro_filter_group, text="Device: ---", foreground="gray")
+        self.gy_lpf1_bw_status.grid(row=1, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         # --- Panel 5: SFLP (Row 2, Col 0) ---
         sflp_group = ttk.LabelFrame(config_frame, text="Sensor Fusion (SFLP)", padding="10")
@@ -486,17 +602,85 @@ class LSM6DSV_GUI:
         self.sflp_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(sflp_group, text="Enable SFLP",
                         variable=self.sflp_enabled_var,
-                        command=self.toggle_sflp).grid(row=0, column=0, sticky=tk.W, pady=3, columnspan=2)
+                        command=self.toggle_sflp).grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.sflp_enabled_status = ttk.Label(sflp_group, text="Device: ---", foreground="gray")
+        self.sflp_enabled_status.grid(row=0, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
         ttk.Label(sflp_group, text="SFLP ODR:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.sflp_odr_var = tk.StringVar(value="15 Hz")
         ttk.Combobox(sflp_group, textvariable=self.sflp_odr_var,
                      values=["15 Hz", "30 Hz", "60 Hz", "120 Hz", "240 Hz", "480 Hz"],
                      width=18, state="readonly").grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.sflp_odr_status = ttk.Label(sflp_group, text="Device: ---", foreground="gray")
+        self.sflp_odr_status.grid(row=1, column=2, sticky=tk.W, pady=3, padx=(10, 0))
 
-        # --- Control Buttons (Row 2, Col 1) ---
+        # --- Panel 6: Accelerometer Offset (Row 3, Col 0) ---
+        offset_group = ttk.LabelFrame(config_frame, text="Accelerometer Offset", padding="10")
+        offset_group.grid(row=3, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Offset enable checkbox
+        self.xl_offset_enable_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(offset_group, text="Enable Hardware Offset",
+                        variable=self.xl_offset_enable_var,
+                        command=lambda: self.send_command(f"SET:XL_OFFSET_ENABLE:{1 if self.xl_offset_enable_var.get() else 0}")).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+        self.xl_offset_enable_status = ttk.Label(offset_group, text="Device: ---", foreground="gray")
+        self.xl_offset_enable_status.grid(row=0, column=3, sticky=tk.W, pady=(0, 10), padx=(10, 0))
+
+        # X offset
+        ttk.Label(offset_group, text="X Offset (mg):").grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.xl_offset_x_var = tk.StringVar(value="0.0")
+        ttk.Entry(offset_group, textvariable=self.xl_offset_x_var, width=10).grid(row=1, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.xl_offset_x_status = ttk.Label(offset_group, text="Device: ---", foreground="gray")
+        self.xl_offset_x_status.grid(row=1, column=3, sticky=tk.W, pady=3, padx=(10, 0))
+
+        # Y offset
+        ttk.Label(offset_group, text="Y Offset (mg):").grid(row=2, column=0, sticky=tk.W, pady=3)
+        self.xl_offset_y_var = tk.StringVar(value="0.0")
+        ttk.Entry(offset_group, textvariable=self.xl_offset_y_var, width=10).grid(row=2, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.xl_offset_y_status = ttk.Label(offset_group, text="Device: ---", foreground="gray")
+        self.xl_offset_y_status.grid(row=2, column=3, sticky=tk.W, pady=3, padx=(10, 0))
+
+        # Z offset
+        ttk.Label(offset_group, text="Z Offset (mg):").grid(row=3, column=0, sticky=tk.W, pady=3)
+        self.xl_offset_z_var = tk.StringVar(value="0.0")
+        ttk.Entry(offset_group, textvariable=self.xl_offset_z_var, width=10).grid(row=3, column=1, pady=3, padx=5, sticky=(tk.W, tk.E))
+        self.xl_offset_z_status = ttk.Label(offset_group, text="Device: ---", foreground="gray")
+        self.xl_offset_z_status.grid(row=3, column=3, sticky=tk.W, pady=3, padx=(10, 0))
+
+        # Calibrate button (moved from Embedded Functions tab)
+        ttk.Label(offset_group, text="Calibration:", font=("Arial", 9, "bold")).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+
+        # Improved calibration instructions with clear orientation guidance
+        instructions_text = (
+            "📋 BEFORE Calibrating:\n"
+            "  ✓ Place sensor on FLAT, LEVEL surface\n"
+            "  ✓ Z-axis pointing UP (perpendicular to table)\n"
+            "  ✓ Keep sensor STATIONARY during calibration"
+        )
+        ttk.Label(offset_group, text=instructions_text, font=("Arial", 8), foreground="#0066cc", justify=tk.LEFT).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
+
+        # Duration input
+        ttk.Label(offset_group, text="Duration (sec):").grid(row=6, column=0, sticky=tk.W, pady=3)
+        self.calibrate_duration_var = tk.IntVar(value=5)
+        ttk.Spinbox(offset_group, textvariable=self.calibrate_duration_var, from_=1, to=30, width=8).grid(row=6, column=1, pady=3, sticky=tk.W)
+
+        # Calibrate button with status label
+        self.calibrate_button = ttk.Button(offset_group, text="🎯 Calibrate & Auto-Populate",
+                   command=self.calibrate_offsets)
+        self.calibrate_button.grid(row=7, column=0, columnspan=2, pady=5, sticky=(tk.W, tk.E))
+
+        # Calibration status label
+        self.calibration_status_var = tk.StringVar(value="")
+        self.calibration_status_label = ttk.Label(offset_group, textvariable=self.calibration_status_var,
+                                                   font=("Arial", 8, "italic"), foreground="gray")
+        self.calibration_status_label.grid(row=7, column=2, columnspan=2, pady=5, sticky=tk.W, padx=(10, 0))
+
+        # Validation label (range: ±15.875mg)
+        ttk.Label(offset_group, text="Valid range: ±15.875 mg", font=("Arial", 8), foreground="gray").grid(row=8, column=0, columnspan=4, pady=(10, 0), sticky=tk.W)
+
+        # --- Control Buttons (Row 3, Col 1) ---
         button_group = ttk.LabelFrame(config_frame, text="Configuration Control", padding="10")
-        button_group.grid(row=2, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        button_group.grid(row=3, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         ttk.Button(button_group, text="🔄 Refresh Config",
                    command=self.refresh_config).pack(fill=tk.X, pady=5, padx=5)
@@ -698,12 +882,7 @@ class LSM6DSV_GUI:
         ttk.Label(selftest_group, text="Result:").grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(selftest_group, textvariable=self.selftest_result_var).grid(row=1, column=1, sticky=tk.W, pady=5, padx=10)
 
-        # Calibration
-        cal_group = ttk.LabelFrame(step_cal_frame, text="Calibration", padding="10")
-        cal_group.grid(row=2, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
-        ttk.Label(cal_group, text="Place sensor on flat surface").grid(row=0, column=0, columnspan=2, pady=5)
-        ttk.Button(cal_group, text="Calibrate Offsets", command=lambda: self.send_command("CALIBRATE")).grid(row=1, column=0, columnspan=2, pady=5, padx=5)
+        # Note: Calibration section has been moved to Configuration tab (Accelerometer Offset panel)
 
         # --- Sub-tab 5: Event Log ---
         event_log_frame = ttk.Frame(int_notebook, padding="10")
@@ -829,6 +1008,31 @@ class LSM6DSV_GUI:
             self.log_message("ERROR: Not connected to serial port\n")
             return False
 
+    def calibrate_offsets(self):
+        """Run calibration and auto-populate hardware offset fields"""
+        duration = self.calibrate_duration_var.get()
+
+        # Disable calibrate button and show status
+        if hasattr(self, 'calibrate_button'):
+            self.calibrate_button.config(state='disabled')
+        if hasattr(self, 'calibration_status_var'):
+            self.calibration_status_var.set(f"⏳ Calibrating ({duration}s)...")
+            self.calibration_status_label.config(foreground="orange")
+
+        self.log_message(f"🎯 Starting {duration}s calibration...\n")
+        self.log_message("   Keep sensor STATIONARY on flat surface!\n")
+        self.send_command(f"CALIBRATE:{duration}")
+
+        # Schedule re-enable of button after expected duration + 2 seconds buffer
+        self.root.after((duration + 2) * 1000, self._reset_calibration_ui)
+
+    def _reset_calibration_ui(self):
+        """Helper to reset calibration UI state"""
+        if hasattr(self, 'calibrate_button'):
+            self.calibrate_button.config(state='normal')
+        if hasattr(self, 'calibration_status_var'):
+            self.calibration_status_var.set("")
+
     def serial_worker(self):
         """Serial port reading thread"""
         buffer = ""
@@ -904,13 +1108,138 @@ class LSM6DSV_GUI:
                     self.log_message(f"ERROR parsing self-test result: {e}\n")
                 return True
 
+            # Check for firmware error messages (ERROR:message format)
+            if line.startswith("ERROR:"):
+                error_msg = line.split(':', 1)[1].strip() if ':' in line else line
+                self.log_message(f"\n❌ FIRMWARE ERROR: {error_msg}\n\n")
+
+                # Check if this is a calibration error and update UI
+                if "calibration" in error_msg.lower():
+                    if hasattr(self, 'calibration_status_var'):
+                        self.calibration_status_var.set("❌ Failed!")
+                        self.calibration_status_label.config(foreground="red")
+                    if hasattr(self, 'calibrate_button'):
+                        self.calibrate_button.config(state='normal')
+                    self.log_message("  TIP: Check that sensor is enabled and reading valid data\n\n")
+
+                return True
+
+            # Check for calibration response (CALIBRATE:X=val,Y=val,Z=val format)
+            if line.startswith("CALIBRATE:"):
+                try:
+                    offset_str = line.split(':', 1)[1].strip()
+                    offsets = {}
+                    for param in offset_str.split(','):
+                        if '=' in param:
+                            key, value = param.split('=', 1)
+                            offsets[key.strip()] = float(value.strip())
+
+                    # Extract X, Y, Z offsets
+                    x_offset = offsets.get('X', 0.0)
+                    y_offset = offsets.get('Y', 0.0)
+                    z_offset = offsets.get('Z', 0.0)
+
+                    self.log_message(f"Calibration complete!\n")
+                    self.log_message(f"  X offset: {x_offset:.3f} mg\n")
+                    self.log_message(f"  Y offset: {y_offset:.3f} mg\n")
+                    self.log_message(f"  Z offset: {z_offset:.3f} mg\n")
+
+                    # Check if offsets are within hardware range (±15.875 mg)
+                    MAX_OFFSET = 15.875
+                    in_range = (abs(x_offset) <= MAX_OFFSET and
+                                abs(y_offset) <= MAX_OFFSET and
+                                abs(z_offset) <= MAX_OFFSET)
+
+                    if in_range:
+                        # Auto-populate hardware offset fields
+                        self.xl_offset_x_var.set(f"{x_offset:.3f}")
+                        self.xl_offset_y_var.set(f"{y_offset:.3f}")
+                        self.xl_offset_z_var.set(f"{z_offset:.3f}")
+
+                        # Auto-apply to hardware registers
+                        self.log_message("Auto-applying offsets to hardware registers...\n")
+                        self.send_command(f"SET:XL_OFFSET_X:{x_offset:.3f}")
+                        self.send_command(f"SET:XL_OFFSET_Y:{y_offset:.3f}")
+                        self.send_command(f"SET:XL_OFFSET_Z:{z_offset:.3f}")
+                        self.send_command("SET:XL_OFFSET_ENABLE:1")
+                        self.xl_offset_enable_var.set(True)
+                        self.log_message("✓ Offsets applied successfully!\n")
+
+                        # Update status label to show success
+                        if hasattr(self, 'calibration_status_var'):
+                            self.calibration_status_var.set("✓ Success!")
+                            self.calibration_status_label.config(foreground="green")
+                    else:
+                        # Show warning - offsets out of range
+                        out_of_range_axes = []
+                        if abs(x_offset) > MAX_OFFSET:
+                            out_of_range_axes.append(f"X={x_offset:.3f}")
+                        if abs(y_offset) > MAX_OFFSET:
+                            out_of_range_axes.append(f"Y={y_offset:.3f}")
+                        if abs(z_offset) > MAX_OFFSET:
+                            out_of_range_axes.append(f"Z={z_offset:.3f}")
+
+                        self.log_message(f"\n⚠⚠⚠ WARNING: Offsets exceed hardware range (±{MAX_OFFSET} mg) ⚠⚠⚠\n")
+                        self.log_message(f"  Out of range: {', '.join(out_of_range_axes)}\n")
+                        self.log_message("  Hardware offsets NOT applied.\n")
+                        self.log_message("  TIP: Check sensor placement - should be on FLAT surface with Z-axis UP\n\n")
+
+                        # Update status label to show warning
+                        if hasattr(self, 'calibration_status_var'):
+                            self.calibration_status_var.set("⚠ Out of range!")
+                            self.calibration_status_label.config(foreground="red")
+
+                    # Re-enable calibrate button immediately
+                    if hasattr(self, 'calibrate_button'):
+                        self.calibrate_button.config(state='normal')
+
+                except Exception as e:
+                    self.log_message(f"\n❌ ERROR parsing calibration result: {e}\n\n")
+                    # Update status label and re-enable button
+                    if hasattr(self, 'calibration_status_var'):
+                        self.calibration_status_var.set("❌ Parse error!")
+                        self.calibration_status_label.config(foreground="red")
+                    if hasattr(self, 'calibrate_button'):
+                        self.calibrate_button.config(state='normal')
+                return True
+
+            # Check for CONFIG response (CONFIG:xl_odr=X,xl_fs=X,... format)
+            if line.startswith("CONFIG:"):
+                try:
+                    config_str = line.split(':', 1)[1].strip()
+                    config_dict = {}
+                    for param in config_str.split(','):
+                        if '=' in param:
+                            key, value = param.split('=', 1)
+                            # Try to parse as float first (for offset values), fall back to int
+                            try:
+                                if '.' in value:
+                                    config_dict[key.strip()] = float(value.strip())
+                                else:
+                                    config_dict[key.strip()] = int(value.strip())
+                            except ValueError:
+                                config_dict[key.strip()] = value.strip()  # Keep as string if not numeric
+
+                    # Store device configuration
+                    self.device_config = config_dict
+
+                    # Update status labels with color coding
+                    self.update_config_status_labels()
+
+                    self.log_message(f"Configuration received and updated: {len(config_dict)} parameters\n")
+                except Exception as e:
+                    self.log_message(f"ERROR parsing CONFIG: {e}\n")
+                return True
+
             parts = line.split(',')
 
-            if parts[0] == "LSM6DSV" and len(parts) >= 8:
-                # LSM6DSV,timestamp,ax,ay,az,gx,gy,gz
+            if parts[0] == "LSM6DSV" and len(parts) >= 11:
+                # v3.1 Format: LSM6DSV,timestamp,acc_valid,ax,ay,az,gyro_valid,gx,gy,gz,error_code
+                # acc_valid/gyro_valid: 0=disabled, 1=valid, 2=error
+                # error_code: 0=none, 1=not_ready, 2=i2c_fail, 3=invalid_data
 
                 # Validate that all required fields are non-empty
-                for i in range(1, 8):
+                for i in range(1, 11):
                     if not parts[i] or parts[i].strip() == '':
                         self.empty_field_count += 1
                         self.log_message(f"PARSE ERROR: Empty field in CSV at position {i}: '{line}'\n")
@@ -919,30 +1248,69 @@ class LSM6DSV_GUI:
 
                 try:
                     timestamp = float(parts[1]) / 1000000.0  # Convert to seconds
-                    ax = float(parts[2])
-                    ay = float(parts[3])
-                    az = float(parts[4])
-                    gx = float(parts[5])
-                    gy = float(parts[6])
-                    gz = float(parts[7])
+                    acc_valid = int(parts[2])
+                    ax = float(parts[3])
+                    ay = float(parts[4])
+                    az = float(parts[5])
+                    gyro_valid = int(parts[6])
+                    gx = float(parts[7])
+                    gy = float(parts[8])
+                    gz = float(parts[9])
+                    error_code = int(parts[10])
                 except ValueError as ve:
                     self.parse_error_count += 1
-                    self.log_message(f"PARSE ERROR: Invalid float value: {ve}\n")
+                    self.log_message(f"PARSE ERROR: Invalid value: {ve}\n")
                     self.log_message(f"  Line: '{line}'\n")
                     self.log_message(f"  Fields: {parts}\n")
                     return False
 
+                # Track error statistics
+                if hasattr(self, 'sensor_error_count'):
+                    if error_code != 0:
+                        self.sensor_error_count += 1
+
                 # Store data (only if not paused)
                 if not is_paused:
-                    self.time_data.append(timestamp)
-                    self.accel_x.append(ax)
-                    self.accel_y.append(ay)
-                    self.accel_z.append(az)
-                    self.gyro_x.append(gx)
-                    self.gyro_y.append(gy)
-                    self.gyro_z.append(gz)
+                    # Only store timestamp and valid sensor data
+                    # For disabled or error sensors, we still store a data point to keep
+                    # the time axis consistent, but the plot can be filtered if needed
 
-                    self.sample_count += 1
+                    has_valid_data = (acc_valid == 1) or (gyro_valid == 1)
+
+                    if has_valid_data:
+                        self.time_data.append(timestamp)
+
+                        # Store accelerometer data (use 0.0 if invalid/disabled)
+                        if acc_valid == 1:
+                            self.accel_x.append(ax)
+                            self.accel_y.append(ay)
+                            self.accel_z.append(az)
+                        else:
+                            # Store placeholder values for invalid/disabled acc
+                            self.accel_x.append(0.0)
+                            self.accel_y.append(0.0)
+                            self.accel_z.append(0.0)
+
+                        # Store gyroscope data (use 0.0 if invalid/disabled)
+                        if gyro_valid == 1:
+                            self.gyro_x.append(gx)
+                            self.gyro_y.append(gy)
+                            self.gyro_z.append(gz)
+                        else:
+                            # Store placeholder values for invalid/disabled gyro
+                            self.gyro_x.append(0.0)
+                            self.gyro_y.append(0.0)
+                            self.gyro_z.append(0.0)
+
+                        self.sample_count += 1
+
+                    # Log errors for visibility
+                    if error_code != 0:
+                        error_names = {0: "none", 1: "not_ready", 2: "i2c_fail", 3: "invalid_data"}
+                        error_name = error_names.get(error_code, f"unknown({error_code})")
+                        acc_status = ["disabled", "valid", "error"][acc_valid] if acc_valid <= 2 else "unknown"
+                        gyro_status = ["disabled", "valid", "error"][gyro_valid] if gyro_valid <= 2 else "unknown"
+                        self.log_message(f"DATA ERROR: acc={acc_status}, gyro={gyro_status}, error={error_name}\n")
 
                 return True
 
@@ -1155,7 +1523,11 @@ class LSM6DSV_GUI:
         self.log_message("Applying configuration...\n")
 
         # Parse and send accelerometer ODR
-        acc_odr = self.acc_odr_var.get().split()[0]  # "120 Hz" -> "120"
+        acc_odr_str = self.acc_odr_var.get()
+        if "Power Down" in acc_odr_str:
+            acc_odr = "0"  # Power down = ODR 0
+        else:
+            acc_odr = acc_odr_str.split()[0]  # "120 Hz" -> "120"
         self.send_command(f"SET:ACC_ODR:{acc_odr}")
         time.sleep(0.02)  # 20ms delay to allow MCU to process command
 
@@ -1165,13 +1537,42 @@ class LSM6DSV_GUI:
         time.sleep(0.02)
 
         # Parse and send gyro ODR
-        gyro_odr = self.gyro_odr_var.get().split()[0]  # "120 Hz" -> "120"
+        gyro_odr_str = self.gyro_odr_var.get()
+        if "Power Down" in gyro_odr_str:
+            gyro_odr = "0"  # Power down = ODR 0
+        else:
+            gyro_odr = gyro_odr_str.split()[0]  # "120 Hz" -> "120"
         self.send_command(f"SET:GYRO_ODR:{gyro_odr}")
         time.sleep(0.02)
 
         # Parse and send gyro full-scale
         gyro_fs = self.gyro_fs_var.get().replace('±', '').replace(' dps', 'DPS')  # "±2000 dps" -> "2000DPS"
         self.send_command(f"SET:GYRO_FS:{gyro_fs}")
+        time.sleep(0.02)
+
+        # Send accelerometer offset values
+        try:
+            xl_offset_x = float(self.xl_offset_x_var.get())
+            xl_offset_y = float(self.xl_offset_y_var.get())
+            xl_offset_z = float(self.xl_offset_z_var.get())
+
+            # Validate range (±15.875mg)
+            if abs(xl_offset_x) > 15.875 or abs(xl_offset_y) > 15.875 or abs(xl_offset_z) > 15.875:
+                self.log_message("WARNING: Offset values clamped to ±15.875mg range\n", "red")
+
+            self.send_command(f"SET:XL_OFFSET_X:{xl_offset_x:.3f}")
+            time.sleep(0.02)
+            self.send_command(f"SET:XL_OFFSET_Y:{xl_offset_y:.3f}")
+            time.sleep(0.02)
+            self.send_command(f"SET:XL_OFFSET_Z:{xl_offset_z:.3f}")
+            time.sleep(0.02)
+
+            # Send offset enable
+            xl_offset_en = 1 if self.xl_offset_enable_var.get() else 0
+            self.send_command(f"SET:XL_OFFSET_ENABLE:{xl_offset_en}")
+            time.sleep(0.02)
+        except ValueError:
+            self.log_message("WARNING: Invalid offset value format, skipping offset configuration\n", "red")
 
         self.log_message("Configuration commands sent\n")
 
@@ -1187,15 +1588,396 @@ class LSM6DSV_GUI:
             self.send_command(f"DISABLE:SFLP")
         self.log_message(f"SFLP {'Enabled' if enabled else 'Disabled'}\n")
 
+    def toggle_accelerometer(self):
+        """Toggle accelerometer enable - coupled with ODR and Mode dropdowns"""
+        if self.updating_acc_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_acc_controls = True
+        try:
+            enabled = self.acc_enabled_var.get()
+            if enabled:
+                # Restore previous ODR and Mode
+                self.acc_odr_var.set(self.last_acc_odr)
+                self.acc_mode_var.set(self.last_acc_mode)
+                odr_numeric = self.last_acc_odr.split()[0]  # Extract numeric part
+                self.send_command(f"SET:ACC_ODR:{odr_numeric}")
+                self.log_message(f"Accelerometer Enabled @ {self.last_acc_odr}, Mode: {self.last_acc_mode}\n")
+            else:
+                # Save current ODR and Mode if not already "Power Down"
+                current_odr = self.acc_odr_var.get()
+                current_mode = self.acc_mode_var.get()
+                if not current_odr.startswith("Power Down"):
+                    self.last_acc_odr = current_odr
+                if current_mode != "Power Down":
+                    self.last_acc_mode = current_mode
+                # Set to Power Down
+                self.acc_odr_var.set("Power Down (0 Hz)")
+                self.acc_mode_var.set("Power Down")
+                self.send_command("SET:ACC_ODR:0")
+                self.log_message("Accelerometer Disabled (Power Down)\n")
+        finally:
+            self.updating_acc_controls = False
+
+    def toggle_gyroscope(self):
+        """Toggle gyroscope enable - coupled with ODR and Mode dropdowns"""
+        if self.updating_gyro_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_gyro_controls = True
+        try:
+            enabled = self.gyro_enabled_var.get()
+            if enabled:
+                # Restore previous ODR and Mode
+                self.gyro_odr_var.set(self.last_gyro_odr)
+                self.gyro_mode_var.set(self.last_gyro_mode)
+                odr_numeric = self.last_gyro_odr.split()[0]  # Extract numeric part
+                self.send_command(f"SET:GYRO_ODR:{odr_numeric}")
+                self.log_message(f"Gyroscope Enabled @ {self.last_gyro_odr}, Mode: {self.last_gyro_mode}\n")
+            else:
+                # Save current ODR and Mode if not already "Power Down"
+                current_odr = self.gyro_odr_var.get()
+                current_mode = self.gyro_mode_var.get()
+                if not current_odr.startswith("Power Down"):
+                    self.last_gyro_odr = current_odr
+                if current_mode != "Power Down":
+                    self.last_gyro_mode = current_mode
+                # Set to Power Down
+                self.gyro_odr_var.set("Power Down (0 Hz)")
+                self.gyro_mode_var.set("Power Down")
+                self.send_command("SET:GYRO_ODR:0")
+                self.log_message("Gyroscope Disabled (Power Down)\n")
+        finally:
+            self.updating_gyro_controls = False
+
+    def on_acc_odr_changed(self, *args):
+        """Callback when accelerometer ODR dropdown changes - sync with checkbox and mode"""
+        if self.updating_acc_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_acc_controls = True
+        try:
+            current_odr = self.acc_odr_var.get()
+            if current_odr.startswith("Power Down"):
+                # Power Down selected - uncheck checkbox, set mode to Power Down
+                self.acc_enabled_var.set(False)
+                self.acc_mode_var.set("Power Down")
+            else:
+                # Non-zero ODR selected - check checkbox, restore mode, update last ODR
+                self.acc_enabled_var.set(True)
+                # Restore mode if currently Power Down
+                if self.acc_mode_var.get() == "Power Down":
+                    self.acc_mode_var.set(self.last_acc_mode)
+                self.last_acc_odr = current_odr
+        finally:
+            self.updating_acc_controls = False
+
+    def on_gyro_odr_changed(self, *args):
+        """Callback when gyroscope ODR dropdown changes - sync with checkbox and mode"""
+        if self.updating_gyro_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_gyro_controls = True
+        try:
+            current_odr = self.gyro_odr_var.get()
+            if current_odr.startswith("Power Down"):
+                # Power Down selected - uncheck checkbox, set mode to Power Down
+                self.gyro_enabled_var.set(False)
+                self.gyro_mode_var.set("Power Down")
+            else:
+                # Non-zero ODR selected - check checkbox, restore mode, update last ODR
+                self.gyro_enabled_var.set(True)
+                # Restore mode if currently Power Down
+                if self.gyro_mode_var.get() == "Power Down":
+                    self.gyro_mode_var.set(self.last_gyro_mode)
+                self.last_gyro_odr = current_odr
+        finally:
+            self.updating_gyro_controls = False
+
+    def on_acc_mode_changed(self, *args):
+        """Callback when accelerometer Mode dropdown changes - sync with checkbox and ODR"""
+        if self.updating_acc_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_acc_controls = True
+        try:
+            current_mode = self.acc_mode_var.get()
+            if current_mode == "Power Down":
+                # Power Down selected - uncheck checkbox, set ODR to 0
+                self.acc_enabled_var.set(False)
+                self.acc_odr_var.set("Power Down (0 Hz)")
+                self.send_command("SET:ACC_ODR:0")
+                self.log_message("Accelerometer Mode set to Power Down (ODR=0)\n")
+            else:
+                # Non-Power Down mode selected - enable sensor and send mode command
+                self.acc_enabled_var.set(True)
+                # Restore ODR if currently at Power Down
+                if self.acc_odr_var.get().startswith("Power Down"):
+                    self.acc_odr_var.set(self.last_acc_odr)
+                    odr_numeric = self.last_acc_odr.split()[0]
+                    self.send_command(f"SET:ACC_ODR:{odr_numeric}")
+                # Save this as last valid mode
+                self.last_acc_mode = current_mode
+                # Send mode command
+                mode_map = {'High Performance': '0', 'High Accuracy': '1', 'ODR Triggered': '3',
+                           'Low Power (2-avg)': '4', 'Low Power (4-avg)': '5',
+                           'Low Power (8-avg)': '6', 'Normal': '7'}
+                mode_value = mode_map.get(current_mode, '0')
+                self.send_command(f"SET:ACC_MODE:{mode_value}")
+                self.log_message(f"Accelerometer Mode set to {current_mode}\n")
+        finally:
+            self.updating_acc_controls = False
+
+    def on_gyro_mode_changed(self, *args):
+        """Callback when gyroscope Mode dropdown changes - sync with checkbox and ODR"""
+        if self.updating_gyro_controls:
+            return  # Prevent infinite loop during programmatic updates
+
+        self.updating_gyro_controls = True
+        try:
+            current_mode = self.gyro_mode_var.get()
+            if current_mode == "Power Down":
+                # Power Down selected - uncheck checkbox, set ODR to 0
+                self.gyro_enabled_var.set(False)
+                self.gyro_odr_var.set("Power Down (0 Hz)")
+                self.send_command("SET:GYRO_ODR:0")
+                self.log_message("Gyroscope Mode set to Power Down (ODR=0)\n")
+            else:
+                # Non-Power Down mode selected - enable sensor and send mode command
+                self.gyro_enabled_var.set(True)
+                # Restore ODR if currently at Power Down
+                if self.gyro_odr_var.get().startswith("Power Down"):
+                    self.gyro_odr_var.set(self.last_gyro_odr)
+                    odr_numeric = self.last_gyro_odr.split()[0]
+                    self.send_command(f"SET:GYRO_ODR:{odr_numeric}")
+                # Save this as last valid mode
+                self.last_gyro_mode = current_mode
+                # Send mode command
+                mode_map = {'High Performance': '0', 'High Accuracy': '1',
+                           'Sleep': '4', 'Low Power': '5'}
+                mode_value = mode_map.get(current_mode, '0')
+                self.send_command(f"SET:GYRO_MODE:{mode_value}")
+                self.log_message(f"Gyroscope Mode set to {current_mode}\n")
+        finally:
+            self.updating_gyro_controls = False
+
     def refresh_config(self):
         """Query current configuration from firmware"""
+        # Clear all status labels first
+        self.clear_config_status_labels()
+
         self.log_message("=" * 60 + "\n")
         self.log_message("REFRESHING CONFIGURATION FROM DEVICE\n")
         self.log_message("=" * 60 + "\n")
         self.send_command("GET:CONFIG")
-        self.log_message("Configuration query sent. Check console for device response.\n")
-        self.log_message("Note: GUI controls are NOT automatically updated from device response.\n")
+        self.log_message("Configuration query sent. Status labels will update when response arrives.\n")
         self.log_message("=" * 60 + "\n")
+
+    def clear_config_status_labels(self):
+        """Clear all configuration status labels"""
+        for label in [self.acc_odr_status, self.acc_fs_status, self.acc_mode_status,
+                      self.gyro_odr_status, self.gyro_fs_status, self.gyro_mode_status,
+                      self.xl_lpf2_status, self.xl_lpf2_bw_status, self.xl_hpf_status,
+                      self.xl_fast_status, self.gy_lpf1_status, self.gy_lpf1_bw_status,
+                      self.sflp_enabled_status, self.sflp_odr_status]:
+            label.config(text="Device: ---", foreground="gray")
+
+    def update_config_status_labels(self):
+        """Update configuration status labels with device values and color coding"""
+        if self.device_config is None:
+            return
+
+        try:
+            # Helper function for color coding
+            def update_label(label, device_value, gui_value):
+                if device_value == gui_value:
+                    label.config(text=f"Device: {device_value}", foreground="#00AA00")  # Green
+                else:
+                    label.config(text=f"Device: {device_value}", foreground="#CC0000")  # Red
+
+            # Accelerometer ODR
+            if 'xl_odr' in self.device_config:
+                device_odr_str = self.map_odr_to_string(self.device_config['xl_odr'])
+                gui_odr_str = self.acc_odr_var.get()
+                update_label(self.acc_odr_status, device_odr_str, gui_odr_str)
+
+                # Update checkbox, ODR dropdown, AND Mode dropdown to match device
+                # Use flag to prevent infinite loop from trace callbacks
+                self.updating_acc_controls = True
+                try:
+                    # Update ODR dropdown
+                    self.acc_odr_var.set(device_odr_str)
+                    # Update checkbox (ODR=0 means powered down)
+                    acc_enabled = (self.device_config['xl_odr'] != 0)
+                    self.acc_enabled_var.set(acc_enabled)
+
+                    if acc_enabled:
+                        # Sensor is ON - update last ODR and restore/update mode
+                        self.last_acc_odr = device_odr_str
+                        # Get mode from device and update dropdown
+                        if 'xl_mode' in self.device_config:
+                            device_mode_str = self.map_xl_mode_to_string(self.device_config['xl_mode'])
+                            self.acc_mode_var.set(device_mode_str)
+                            self.last_acc_mode = device_mode_str
+                    else:
+                        # Sensor is OFF (ODR=0) - set mode to Power Down
+                        self.acc_mode_var.set("Power Down")
+                finally:
+                    self.updating_acc_controls = False
+
+            # Accelerometer Full Scale
+            if 'xl_fs' in self.device_config:
+                device_fs_str = self.map_xl_fs_to_string(self.device_config['xl_fs'])
+                gui_fs_str = self.acc_fs_var.get()
+                update_label(self.acc_fs_status, device_fs_str, gui_fs_str)
+
+            # Accelerometer Mode (status label only - dropdown already updated in ODR section)
+            if 'xl_mode' in self.device_config and 'xl_odr' in self.device_config:
+                # If sensor is off (ODR=0), show "Power Down" in status
+                if self.device_config['xl_odr'] == 0:
+                    device_mode_str = "Power Down"
+                else:
+                    device_mode_str = self.map_xl_mode_to_string(self.device_config['xl_mode'])
+                gui_mode_str = self.acc_mode_var.get()
+                update_label(self.acc_mode_status, device_mode_str, gui_mode_str)
+
+            # Gyroscope ODR
+            if 'gy_odr' in self.device_config:
+                device_odr_str = self.map_odr_to_string(self.device_config['gy_odr'])
+                gui_odr_str = self.gyro_odr_var.get()
+                update_label(self.gyro_odr_status, device_odr_str, gui_odr_str)
+
+                # Update checkbox, ODR dropdown, AND Mode dropdown to match device
+                # Use flag to prevent infinite loop from trace callbacks
+                self.updating_gyro_controls = True
+                try:
+                    # Update ODR dropdown
+                    self.gyro_odr_var.set(device_odr_str)
+                    # Update checkbox (ODR=0 means powered down)
+                    gyro_enabled = (self.device_config['gy_odr'] != 0)
+                    self.gyro_enabled_var.set(gyro_enabled)
+
+                    if gyro_enabled:
+                        # Sensor is ON - update last ODR and restore/update mode
+                        self.last_gyro_odr = device_odr_str
+                        # Get mode from device and update dropdown
+                        if 'gy_mode' in self.device_config:
+                            device_mode_str = self.map_gy_mode_to_string(self.device_config['gy_mode'])
+                            self.gyro_mode_var.set(device_mode_str)
+                            self.last_gyro_mode = device_mode_str
+                    else:
+                        # Sensor is OFF (ODR=0) - set mode to Power Down
+                        self.gyro_mode_var.set("Power Down")
+                finally:
+                    self.updating_gyro_controls = False
+
+            # Gyroscope Full Scale
+            if 'gy_fs' in self.device_config:
+                device_fs_str = self.map_gy_fs_to_string(self.device_config['gy_fs'])
+                gui_fs_str = self.gyro_fs_var.get()
+                update_label(self.gyro_fs_status, device_fs_str, gui_fs_str)
+
+            # Gyroscope Mode (status label only - dropdown already updated in ODR section)
+            if 'gy_mode' in self.device_config and 'gy_odr' in self.device_config:
+                # If sensor is off (ODR=0), show "Power Down" in status
+                if self.device_config['gy_odr'] == 0:
+                    device_mode_str = "Power Down"
+                else:
+                    device_mode_str = self.map_gy_mode_to_string(self.device_config['gy_mode'])
+                gui_mode_str = self.gyro_mode_var.get()
+                update_label(self.gyro_mode_status, device_mode_str, gui_mode_str)
+
+            # Accel LPF2 Enable
+            if 'xl_lpf2' in self.device_config:
+                device_lpf2 = "Enabled" if self.device_config['xl_lpf2'] == 1 else "Disabled"
+                gui_lpf2 = "Enabled" if self.xl_lpf2_var.get() else "Disabled"
+                update_label(self.xl_lpf2_status, device_lpf2, gui_lpf2)
+
+            # Accel LPF2 Bandwidth
+            if 'xl_lpf2_bw' in self.device_config:
+                device_bw = str(self.device_config['xl_lpf2_bw'])
+                gui_bw = self.xl_lpf2_bw_var.get()
+                update_label(self.xl_lpf2_bw_status, device_bw, gui_bw)
+
+            # Accel HPF Enable
+            if 'xl_hpf' in self.device_config:
+                device_hpf = "Enabled" if self.device_config['xl_hpf'] == 1 else "Disabled"
+                gui_hpf = "Enabled" if self.xl_hpf_var.get() else "Disabled"
+                update_label(self.xl_hpf_status, device_hpf, gui_hpf)
+
+            # Accel Fast Settling
+            if 'xl_fast' in self.device_config:
+                device_fast = "Enabled" if self.device_config['xl_fast'] == 1 else "Disabled"
+                gui_fast = "Enabled" if self.xl_fast_var.get() else "Disabled"
+                update_label(self.xl_fast_status, device_fast, gui_fast)
+
+            # Gyro LPF1 Enable
+            if 'gy_lpf1' in self.device_config:
+                device_lpf1 = "Enabled" if self.device_config['gy_lpf1'] == 1 else "Disabled"
+                gui_lpf1 = "Enabled" if self.gy_lpf1_var.get() else "Disabled"
+                update_label(self.gy_lpf1_status, device_lpf1, gui_lpf1)
+
+            # Gyro LPF1 Bandwidth
+            if 'gy_lpf1_bw' in self.device_config:
+                device_bw = str(self.device_config['gy_lpf1_bw'])
+                gui_bw = self.gy_lpf1_bw_var.get()
+                update_label(self.gy_lpf1_bw_status, device_bw, gui_bw)
+
+            # SFLP Enable
+            if 'sflp_en' in self.device_config:
+                device_sflp = "Enabled" if self.device_config['sflp_en'] == 1 else "Disabled"
+                gui_sflp = "Enabled" if self.sflp_enabled_var.get() else "Disabled"
+                update_label(self.sflp_enabled_status, device_sflp, gui_sflp)
+
+            # SFLP ODR
+            if 'sflp_odr' in self.device_config:
+                device_odr_str = self.map_sflp_odr_to_string(self.device_config['sflp_odr'])
+                gui_odr_str = self.sflp_odr_var.get()
+                update_label(self.sflp_odr_status, device_odr_str, gui_odr_str)
+
+            # Accelerometer Offset X
+            if 'xl_offset_x' in self.device_config:
+                device_val = f"{self.device_config['xl_offset_x']:.3f}"
+                try:
+                    gui_val = f"{float(self.xl_offset_x_var.get()):.3f}"
+                except ValueError:
+                    gui_val = "0.000"
+                update_label(self.xl_offset_x_status, device_val, gui_val)
+                # Also update the entry field with device value
+                self.xl_offset_x_var.set(device_val)
+
+            # Accelerometer Offset Y
+            if 'xl_offset_y' in self.device_config:
+                device_val = f"{self.device_config['xl_offset_y']:.3f}"
+                try:
+                    gui_val = f"{float(self.xl_offset_y_var.get()):.3f}"
+                except ValueError:
+                    gui_val = "0.000"
+                update_label(self.xl_offset_y_status, device_val, gui_val)
+                # Also update the entry field with device value
+                self.xl_offset_y_var.set(device_val)
+
+            # Accelerometer Offset Z
+            if 'xl_offset_z' in self.device_config:
+                device_val = f"{self.device_config['xl_offset_z']:.3f}"
+                try:
+                    gui_val = f"{float(self.xl_offset_z_var.get()):.3f}"
+                except ValueError:
+                    gui_val = "0.000"
+                update_label(self.xl_offset_z_status, device_val, gui_val)
+                # Also update the entry field with device value
+                self.xl_offset_z_var.set(device_val)
+
+            # Accelerometer Offset Enable
+            if 'xl_offset_en' in self.device_config:
+                device_offset_en = "Enabled" if self.device_config['xl_offset_en'] == 1 else "Disabled"
+                gui_offset_en = "Enabled" if self.xl_offset_enable_var.get() else "Disabled"
+                update_label(self.xl_offset_enable_status, device_offset_en, gui_offset_en)
+                # Also update the checkbox with device value
+                self.xl_offset_enable_var.set(self.device_config['xl_offset_en'] == 1)
+
+        except Exception as e:
+            self.log_message(f"ERROR updating config status labels: {e}\n")
 
     def apply_odr_with_mode_check(self, sensor_type):
         """Apply ODR with automatic High Accuracy mode switching if needed"""
@@ -1423,6 +2205,7 @@ class LSM6DSV_GUI:
         self.sample_count = 0
         self.parse_error_count = 0
         self.empty_field_count = 0
+        self.sensor_error_count = 0  # v3.1: Reset sensor error count
         self.start_time = time.time()
 
         self.log_message("All data cleared\n")

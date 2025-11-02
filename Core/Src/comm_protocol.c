@@ -347,14 +347,29 @@ int32_t comm_protocol_execute_command(comm_protocol_t *comm, const command_t *cm
             break;
         }
 
-        case CMD_CALIBRATE:
-            result = sensor_manager_calibrate_offsets(comm->sensor_mgr);
+        case CMD_CALIBRATE: {
+            uint32_t duration_sec = 1;  /* Default 1 second */
+            float acc_offset[3], gyro_offset[3];
+            char response[128];
+
+            /* Parse duration parameter if provided */
+            if (cmd->param_count > 0) {
+                duration_sec = (uint32_t)atoi(cmd->params[0]);
+                if (duration_sec < 1) duration_sec = 1;
+                if (duration_sec > 30) duration_sec = 30;  /* Max 30 seconds */
+            }
+
+            result = sensor_manager_calibrate_offsets(comm->sensor_mgr, duration_sec, acc_offset, gyro_offset);
             if (result == 0) {
-                comm_protocol_send_response(comm, RESP_OK, NULL);
+                /* Format response with offset values */
+                snprintf(response, sizeof(response), "CALIBRATE:X=%.3f,Y=%.3f,Z=%.3f\r\n",
+                         acc_offset[0], acc_offset[1], acc_offset[2]);
+                comm_protocol_send_string(comm, response);
             } else {
                 comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Calibration failed");
             }
             break;
+        }
 
         default:
         case CMD_UNKNOWN:
@@ -839,6 +854,50 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
             break;
         }
 
+        case PARAM_XL_OFFSET_X: {
+            float offset_mg = atof(value);
+            result = sensor_manager_set_xl_offset_hw(comm->sensor_mgr, 0, offset_mg);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set X offset");
+            }
+            break;
+        }
+
+        case PARAM_XL_OFFSET_Y: {
+            float offset_mg = atof(value);
+            result = sensor_manager_set_xl_offset_hw(comm->sensor_mgr, 1, offset_mg);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set Y offset");
+            }
+            break;
+        }
+
+        case PARAM_XL_OFFSET_Z: {
+            float offset_mg = atof(value);
+            result = sensor_manager_set_xl_offset_hw(comm->sensor_mgr, 2, offset_mg);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set Z offset");
+            }
+            break;
+        }
+
+        case PARAM_XL_OFFSET_ENABLE: {
+            bool enable = (atoi(value) != 0);
+            result = sensor_manager_enable_xl_offset_hw(comm->sensor_mgr, enable);
+            if (result == 0) {
+                comm_protocol_send_response(comm, RESP_OK, NULL);
+            } else {
+                comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set offset enable");
+            }
+            break;
+        }
+
         default:
         case PARAM_UNKNOWN:
             comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Unknown parameter");
@@ -1083,6 +1142,10 @@ parameter_type_t comm_protocol_get_param_type(const char *param)
     if (strcmp(param, "XL_FAST_SETTLING") == 0) return PARAM_XL_FAST_SETTLING;
     if (strcmp(param, "GY_LPF1") == 0) return PARAM_GY_LPF1;
     if (strcmp(param, "GY_LPF1_BW") == 0) return PARAM_GY_LPF1_BW;
+    if (strcmp(param, "XL_OFFSET_X") == 0) return PARAM_XL_OFFSET_X;
+    if (strcmp(param, "XL_OFFSET_Y") == 0) return PARAM_XL_OFFSET_Y;
+    if (strcmp(param, "XL_OFFSET_Z") == 0) return PARAM_XL_OFFSET_Z;
+    if (strcmp(param, "XL_OFFSET_ENABLE") == 0) return PARAM_XL_OFFSET_ENABLE;
 
     return PARAM_UNKNOWN;
 }
@@ -1327,6 +1390,38 @@ static int32_t execute_enable(comm_protocol_t *comm, const char *param)
         return result;
     }
 
+    /* Handle accelerometer enable */
+    if (strcmp(param, "ACCELEROMETER") == 0) {
+        /* Restore accelerometer to configured ODR (or 120Hz if currently OFF) */
+        lsm6dsv_data_rate_t odr = comm->sensor_mgr->config.xl_odr;
+        if (odr == LSM6DSV_ODR_OFF) {
+            odr = LSM6DSV_ODR_AT_120Hz;  /* Default to 120Hz */
+        }
+        int32_t result = sensor_manager_set_xl_odr(comm->sensor_mgr, odr);
+        if (result == 0) {
+            comm_protocol_send_response(comm, RESP_OK, NULL);
+        } else {
+            comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to enable accelerometer");
+        }
+        return result;
+    }
+
+    /* Handle gyroscope enable */
+    if (strcmp(param, "GYROSCOPE") == 0) {
+        /* Restore gyroscope to configured ODR (or 120Hz if currently OFF) */
+        lsm6dsv_data_rate_t odr = comm->sensor_mgr->config.gy_odr;
+        if (odr == LSM6DSV_ODR_OFF) {
+            odr = LSM6DSV_ODR_AT_120Hz;  /* Default to 120Hz */
+        }
+        int32_t result = sensor_manager_set_gy_odr(comm->sensor_mgr, odr);
+        if (result == 0) {
+            comm_protocol_send_response(comm, RESP_OK, NULL);
+        } else {
+            comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to enable gyroscope");
+        }
+        return result;
+    }
+
     /* Handle other embedded functions */
     function_type_t func = comm_protocol_get_function_type(param);
     int32_t result = -1;
@@ -1386,6 +1481,30 @@ static int32_t execute_disable(comm_protocol_t *comm, const char *param)
         return result;
     }
 
+    /* Handle accelerometer disable */
+    if (strcmp(param, "ACCELEROMETER") == 0) {
+        /* Power down accelerometer by setting ODR to OFF */
+        int32_t result = sensor_manager_set_xl_odr(comm->sensor_mgr, LSM6DSV_ODR_OFF);
+        if (result == 0) {
+            comm_protocol_send_response(comm, RESP_OK, NULL);
+        } else {
+            comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to disable accelerometer");
+        }
+        return result;
+    }
+
+    /* Handle gyroscope disable */
+    if (strcmp(param, "GYROSCOPE") == 0) {
+        /* Power down gyroscope by setting ODR to OFF */
+        int32_t result = sensor_manager_set_gy_odr(comm->sensor_mgr, LSM6DSV_ODR_OFF);
+        if (result == 0) {
+            comm_protocol_send_response(comm, RESP_OK, NULL);
+        } else {
+            comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to disable gyroscope");
+        }
+        return result;
+    }
+
     /* Handle other embedded functions */
     function_type_t func = comm_protocol_get_function_type(param);
     int32_t result = -1;
@@ -1435,13 +1554,29 @@ static int32_t execute_get_config(comm_protocol_t *comm)
 {
     char config[512];
 
-    /* Format configuration as key=value pairs */
-    sprintf(config, "CONFIG:xl_odr=%d,xl_fs=%d,gy_odr=%d,gy_fs=%d,sflp_en=%d\r\n",
+    /* Format configuration as key=value pairs (all Configuration tab parameters) */
+    sprintf(config, "CONFIG:xl_odr=%d,xl_fs=%d,xl_mode=%d,gy_odr=%d,gy_fs=%d,gy_mode=%d,"
+                    "xl_lpf2=%d,xl_lpf2_bw=%d,xl_hpf=%d,xl_fast=%d,"
+                    "gy_lpf1=%d,gy_lpf1_bw=%d,sflp_en=%d,sflp_odr=%d,"
+                    "xl_offset_x=%.3f,xl_offset_y=%.3f,xl_offset_z=%.3f,xl_offset_en=%d\r\n",
             (int)comm->sensor_mgr->config.xl_odr,
             (int)comm->sensor_mgr->config.xl_fs,
+            (int)comm->sensor_mgr->config.xl_mode,
             (int)comm->sensor_mgr->config.gy_odr,
             (int)comm->sensor_mgr->config.gy_fs,
-            comm->sensor_mgr->config.sflp_game_en ? 1 : 0);
+            (int)comm->sensor_mgr->config.gy_mode,
+            comm->sensor_mgr->config.xl_lpf2_en ? 1 : 0,
+            (int)comm->sensor_mgr->config.xl_lpf2_bw,
+            comm->sensor_mgr->config.xl_hpf_en ? 1 : 0,
+            comm->sensor_mgr->config.xl_fast_settling_en ? 1 : 0,
+            comm->sensor_mgr->config.gy_lpf1_en ? 1 : 0,
+            (int)comm->sensor_mgr->config.gy_lpf1_bw,
+            comm->sensor_mgr->config.sflp_game_en ? 1 : 0,
+            (int)comm->sensor_mgr->config.sflp_odr,
+            comm->sensor_mgr->config.xl_offset_x,
+            comm->sensor_mgr->config.xl_offset_y,
+            comm->sensor_mgr->config.xl_offset_z,
+            comm->sensor_mgr->config.xl_offset_en ? 1 : 0);
 
     comm_protocol_send_string(comm, config);
     return 0;
@@ -1454,35 +1589,38 @@ static int32_t execute_get_config(comm_protocol_t *comm)
  */
 static lsm6dsv_data_rate_t parse_odr_value(float odr_hz)
 {
-    /* Check for High Accuracy Mode 2 (HA2) ODRs first */
-    if (odr_hz >= 12.0f && odr_hz <= 13.0f) return LSM6DSV_ODR_HA02_AT_12Hz5;    /* 12.5 Hz */
-    if (odr_hz >= 24.0f && odr_hz <= 26.0f) return LSM6DSV_ODR_HA02_AT_25Hz;     /* 25 Hz */
-    if (odr_hz >= 49.0f && odr_hz <= 51.0f) return LSM6DSV_ODR_HA02_AT_50Hz;     /* 50 Hz */
-    if (odr_hz >= 99.0f && odr_hz <= 101.0f) return LSM6DSV_ODR_HA02_AT_100Hz;   /* 100 Hz */
-    if (odr_hz >= 199.0f && odr_hz <= 201.0f) return LSM6DSV_ODR_HA02_AT_200Hz;  /* 200 Hz */
-    if (odr_hz >= 399.0f && odr_hz <= 401.0f) return LSM6DSV_ODR_HA02_AT_400Hz;  /* 400 Hz */
-    if (odr_hz >= 799.0f && odr_hz <= 801.0f) return LSM6DSV_ODR_HA02_AT_800Hz;  /* 800 Hz */
-    if (odr_hz >= 1599.0f && odr_hz <= 1601.0f) return LSM6DSV_ODR_HA02_AT_1600Hz; /* 1600 Hz */
-    if (odr_hz >= 3199.0f && odr_hz <= 3201.0f) return LSM6DSV_ODR_HA02_AT_3200Hz; /* 3200 Hz */
-    if (odr_hz >= 6399.0f && odr_hz <= 6401.0f) return LSM6DSV_ODR_HA02_AT_6400Hz; /* 6400 Hz */
+    /* Map standard ODR values to enums first (covers common use cases) */
+    if (odr_hz <= 0.5f) return LSM6DSV_ODR_OFF;  /* Only explicit zero/very low values power down */
+    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;  /* 1.875 Hz - now works correctly! */
+    if (odr_hz < 11.0f) return LSM6DSV_ODR_AT_7Hz5;   /* 7.5 Hz */
+    if (odr_hz < 12.0f) return LSM6DSV_ODR_AT_15Hz;   /* 15 Hz - before HA2 12.5 Hz check */
 
-    /* Check for High Accuracy Mode 1 (HA1) ODRs */
-    if (odr_hz >= 15.0f && odr_hz <= 16.0f) return LSM6DSV_ODR_HA01_AT_15Hz625;  /* 15.625 Hz */
-    if (odr_hz >= 31.0f && odr_hz <= 32.0f) return LSM6DSV_ODR_HA01_AT_31Hz25;   /* 31.25 Hz */
-    if (odr_hz >= 62.0f && odr_hz <= 63.0f) return LSM6DSV_ODR_HA01_AT_62Hz5;    /* 62.5 Hz */
-    if (odr_hz >= 124.0f && odr_hz <= 126.0f) return LSM6DSV_ODR_HA01_AT_125Hz;  /* 125 Hz */
-    if (odr_hz >= 249.0f && odr_hz <= 251.0f) return LSM6DSV_ODR_HA01_AT_250Hz;  /* 250 Hz */
-    if (odr_hz >= 499.0f && odr_hz <= 501.0f) return LSM6DSV_ODR_HA01_AT_500Hz;  /* 500 Hz */
-    if (odr_hz >= 999.0f && odr_hz <= 1001.0f) return LSM6DSV_ODR_HA01_AT_1000Hz; /* 1000 Hz */
-    if (odr_hz >= 1999.0f && odr_hz <= 2001.0f) return LSM6DSV_ODR_HA01_AT_2000Hz; /* 2000 Hz */
-    if (odr_hz >= 3999.0f && odr_hz <= 4001.0f) return LSM6DSV_ODR_HA01_AT_4000Hz; /* 4000 Hz */
-    if (odr_hz >= 7999.0f && odr_hz <= 8001.0f) return LSM6DSV_ODR_HA01_AT_8000Hz; /* 8000 Hz */
+    /* Check for High Accuracy Mode 2 (HA2) ODRs with exact matching */
+    if (odr_hz >= 12.4f && odr_hz <= 12.6f) return LSM6DSV_ODR_HA02_AT_12Hz5;    /* 12.5 Hz */
+    if (odr_hz >= 24.9f && odr_hz <= 25.1f) return LSM6DSV_ODR_HA02_AT_25Hz;     /* 25 Hz */
+    if (odr_hz >= 49.9f && odr_hz <= 50.1f) return LSM6DSV_ODR_HA02_AT_50Hz;     /* 50 Hz */
+    if (odr_hz >= 99.9f && odr_hz <= 100.1f) return LSM6DSV_ODR_HA02_AT_100Hz;   /* 100 Hz */
+    if (odr_hz >= 199.9f && odr_hz <= 200.1f) return LSM6DSV_ODR_HA02_AT_200Hz;  /* 200 Hz */
+    if (odr_hz >= 399.9f && odr_hz <= 400.1f) return LSM6DSV_ODR_HA02_AT_400Hz;  /* 400 Hz */
+    if (odr_hz >= 799.9f && odr_hz <= 800.1f) return LSM6DSV_ODR_HA02_AT_800Hz;  /* 800 Hz */
+    if (odr_hz >= 1599.9f && odr_hz <= 1600.1f) return LSM6DSV_ODR_HA02_AT_1600Hz; /* 1600 Hz */
+    if (odr_hz >= 3199.9f && odr_hz <= 3200.1f) return LSM6DSV_ODR_HA02_AT_3200Hz; /* 3200 Hz */
+    if (odr_hz >= 6399.9f && odr_hz <= 6400.1f) return LSM6DSV_ODR_HA02_AT_6400Hz; /* 6400 Hz */
 
-    /* Map standard ODR values to enums */
-    if (odr_hz < 2.0f) return LSM6DSV_ODR_OFF;
-    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;  /* 1.875 Hz */
-    if (odr_hz < 11.0f) return LSM6DSV_ODR_AT_7Hz5;
-    if (odr_hz < 22.0f) return LSM6DSV_ODR_AT_15Hz;
+    /* Check for High Accuracy Mode 1 (HA1) ODRs with exact matching */
+    if (odr_hz >= 15.5f && odr_hz <= 15.7f) return LSM6DSV_ODR_HA01_AT_15Hz625;  /* 15.625 Hz */
+    if (odr_hz >= 31.2f && odr_hz <= 31.3f) return LSM6DSV_ODR_HA01_AT_31Hz25;   /* 31.25 Hz */
+    if (odr_hz >= 62.4f && odr_hz <= 62.6f) return LSM6DSV_ODR_HA01_AT_62Hz5;    /* 62.5 Hz */
+    if (odr_hz >= 124.9f && odr_hz <= 125.1f) return LSM6DSV_ODR_HA01_AT_125Hz;  /* 125 Hz */
+    if (odr_hz >= 249.9f && odr_hz <= 250.1f) return LSM6DSV_ODR_HA01_AT_250Hz;  /* 250 Hz */
+    if (odr_hz >= 499.9f && odr_hz <= 500.1f) return LSM6DSV_ODR_HA01_AT_500Hz;  /* 500 Hz */
+    if (odr_hz >= 999.9f && odr_hz <= 1000.1f) return LSM6DSV_ODR_HA01_AT_1000Hz; /* 1000 Hz */
+    if (odr_hz >= 1999.9f && odr_hz <= 2000.1f) return LSM6DSV_ODR_HA01_AT_2000Hz; /* 2000 Hz */
+    if (odr_hz >= 3999.9f && odr_hz <= 4000.1f) return LSM6DSV_ODR_HA01_AT_4000Hz; /* 4000 Hz */
+    if (odr_hz >= 7999.9f && odr_hz <= 8000.1f) return LSM6DSV_ODR_HA01_AT_8000Hz; /* 8000 Hz */
+
+    /* Continue with remaining standard ODR values */
+    if (odr_hz < 22.0f) return LSM6DSV_ODR_AT_15Hz;   /* Catch-all for 15 Hz region */
     if (odr_hz < 45.0f) return LSM6DSV_ODR_AT_30Hz;
     if (odr_hz < 90.0f) return LSM6DSV_ODR_AT_60Hz;
     if (odr_hz < 180.0f) return LSM6DSV_ODR_AT_120Hz;

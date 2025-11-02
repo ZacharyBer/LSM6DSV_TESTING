@@ -124,6 +124,10 @@ typedef enum {
     PARAM_XL_FAST_SETTLING,
     PARAM_GY_LPF1,
     PARAM_GY_LPF1_BW,
+    PARAM_XL_OFFSET_X,
+    PARAM_XL_OFFSET_Y,
+    PARAM_XL_OFFSET_Z,
+    PARAM_XL_OFFSET_ENABLE,
     PARAM_UNKNOWN
 } parameter_type_t;
 

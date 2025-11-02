@@ -44,12 +44,17 @@ int32_t data_formatter_init(format_config_t *config)
 }
 
 /**
- * @brief  Format sensor data as CSV string
+ * @brief  Format sensor data as CSV string with validity flags (v3.1)
  * @param  buffer: Output buffer for formatted string
  * @param  size: Size of output buffer
- * @param  data: Sensor data to format
+ * @param  sensor_data: Sensor data to format (includes validity flags)
+ * @param  sflp_data: SFLP data (unused, for compatibility)
  * @param  config: Format configuration (NULL for default)
  * @retval Number of characters written, or -1 on error
+ * @note   New format: LSM6DSV,<timestamp>,<acc_valid>,<ax>,<ay>,<az>,<gyro_valid>,<gx>,<gy>,<gz>,<err_code>
+ *         - acc_valid/gyro_valid: 0=disabled, 1=valid, 2=error
+ *         - err_code: 0=none, 1=not_ready, 2=i2c_fail, 3=invalid_data
+ *         - Fixed-length format with all fields present
  */
 int32_t data_formatter_csv_data(char *buffer, size_t size,
                                 const sensor_data_t *sensor_data,
@@ -60,52 +65,46 @@ int32_t data_formatter_csv_data(char *buffer, size_t size,
         return -1;
     }
 
-    /* Suppress unused parameter warning */
+    /* Suppress unused parameter warnings */
     (void)sflp_data;
+    (void)config;  /* v3.1: Format is now fixed, config ignored */
 
-    const format_config_t *cfg = (config != NULL) ? config : &default_config;
     int len = 0;
     char temp[32];
 
-    /* Start with header */
-    len = snprintf(buffer, size, "LSM6DSV");
+    /* Header and timestamp (always included) */
+    len = snprintf(buffer, size, "LSM6DSV,%lu", sensor_data->timestamp);
 
-    /* Add timestamp if configured */
-    if (cfg->include_timestamp) {
-        len += snprintf(buffer + len, size - len, ",%lu", sensor_data->timestamp);
-    }
+    /* Accelerometer validity flag */
+    len += snprintf(buffer + len, size - len, ",%u", sensor_data->acc_valid);
 
-    /* Add accelerometer data */
-    if (cfg->include_acc) {
-        format_float(temp, sensor_data->acc_x, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
+    /* Accelerometer data (output even if invalid/disabled for fixed format) */
+    format_float(temp, sensor_data->acc_x, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, sensor_data->acc_y, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
+    format_float(temp, sensor_data->acc_y, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, sensor_data->acc_z, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
-    }
+    format_float(temp, sensor_data->acc_z, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-    /* Add gyroscope data */
-    if (cfg->include_gyro) {
-        format_float(temp, sensor_data->gyro_x, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
+    /* Gyroscope validity flag */
+    len += snprintf(buffer + len, size - len, ",%u", sensor_data->gyro_valid);
 
-        format_float(temp, sensor_data->gyro_y, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
+    /* Gyroscope data (output even if invalid/disabled for fixed format) */
+    format_float(temp, sensor_data->gyro_x, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-        format_float(temp, sensor_data->gyro_z, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
-    }
+    format_float(temp, sensor_data->gyro_y, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-    /* Add temperature if configured */
-    if (cfg->include_temperature) {
-        format_float(temp, sensor_data->temp, cfg->decimal_places);
-        len += snprintf(buffer + len, size - len, ",%s", temp);
-    }
+    format_float(temp, sensor_data->gyro_z, 2);
+    len += snprintf(buffer + len, size - len, ",%s", temp);
 
-    /* Add line ending */
+    /* Error code */
+    len += snprintf(buffer + len, size - len, ",%u", sensor_data->error_code);
+
+    /* Line ending */
     len += snprintf(buffer + len, size - len, "\r\n");
 
     return len;

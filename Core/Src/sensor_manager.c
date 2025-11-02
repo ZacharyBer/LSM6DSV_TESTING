@@ -133,6 +133,27 @@ static float convert_gyro_to_mdps(int16_t lsb, lsm6dsv_gy_full_scale_t fs)
     }
 }
 
+/**
+ * @brief  Check if raw sensor data appears invalid
+ * @note   Detects common invalid patterns: all zeros, all 0xFFFF, stuck values
+ * @retval true if data appears invalid, false if data looks valid
+ */
+static bool is_raw_data_invalid(int16_t data[3])
+{
+    /* Check for all zeros */
+    if (data[0] == 0 && data[1] == 0 && data[2] == 0) {
+        return true;
+    }
+
+    /* Check for all 0xFFFF (common I2C failure pattern) */
+    if (data[0] == (int16_t)0xFFFF && data[1] == (int16_t)0xFFFF && data[2] == (int16_t)0xFFFF) {
+        return true;
+    }
+
+    /* Data appears valid */
+    return false;
+}
+
 /* ============================================================================
  * Public API Implementation
  * ============================================================================ */
@@ -498,86 +519,148 @@ int32_t sensor_manager_stop(sensor_manager_t *mgr)
 }
 
 /**
- * @brief  Read accelerometer and gyroscope data
+ * @brief  Read accelerometer and gyroscope data with error detection
  * @param  mgr: Pointer to sensor manager structure
  * @param  data: Pointer to sensor data structure to fill
- * @retval 0 on success, -1 on error
+ * @retval 0 (always succeeds - check validity flags for actual status)
+ * @note   v3.1: Enhanced with flexible sensor configuration and error handling
+ *         - Supports acc-only, gyro-only, or both configurations
+ *         - Sets validity flags: 0=disabled, 1=valid, 2=error
+ *         - Sets error_code for diagnostics
+ *         - Never fails - caller checks validity flags
  */
 int32_t sensor_manager_read_data(sensor_manager_t *mgr, sensor_data_t *data)
 {
     int32_t ret;
-    int16_t raw_accel[3];
-    int16_t raw_gyro[3];
+    int16_t raw_accel[3] = {0};
+    int16_t raw_gyro[3] = {0};
     int16_t raw_temp;
     lsm6dsv_data_ready_t drdy;
+    bool acc_enabled, gyro_enabled;
+
+    /* Initialize data structure with defaults */
+    memset(data, 0, sizeof(sensor_data_t));
+    data->error_code = SENSOR_ERROR_NONE;
+    data->timestamp = platform_get_timestamp();
 
     if (mgr == NULL || data == NULL || !mgr->initialized) {
-        return -1;
+        data->acc_valid = SENSOR_STATUS_ERROR;
+        data->gyro_valid = SENSOR_STATUS_ERROR;
+        data->error_code = SENSOR_ERROR_I2C_FAIL;
+        return 0;  /* Return success, but with error flags set */
+    }
+
+    /* Determine which sensors are enabled */
+    acc_enabled = (mgr->config.xl_odr != LSM6DSV_ODR_OFF);
+    gyro_enabled = (mgr->config.gy_odr != LSM6DSV_ODR_OFF);
+
+    /* Set initial validity status based on enabled state */
+    data->acc_valid = acc_enabled ? SENSOR_STATUS_ERROR : SENSOR_STATUS_DISABLED;
+    data->gyro_valid = gyro_enabled ? SENSOR_STATUS_ERROR : SENSOR_STATUS_DISABLED;
+
+    /* If both sensors disabled, return early */
+    if (!acc_enabled && !gyro_enabled) {
+        return 0;
     }
 
     /* Check if data is ready */
     ret = lsm6dsv_flag_data_ready_get(&mgr->ctx, &drdy);
     if (ret != 0) {
         mgr->errors_count++;
-        return -1;
+        data->error_code = SENSOR_ERROR_I2C_FAIL;
+        /* Both enabled sensors marked as error */
+        return 0;
     }
 
-    /* Only read if both accel and gyro data are ready */
-    if (!drdy.drdy_xl || !drdy.drdy_gy) {
-        return -1;  /* Data not ready yet */
+    /* ========== Process Accelerometer ========== */
+    if (acc_enabled) {
+        if (!drdy.drdy_xl) {
+            /* Data not ready */
+            data->acc_valid = SENSOR_STATUS_ERROR;
+            data->error_code = SENSOR_ERROR_NOT_READY;
+        } else {
+            /* Attempt to read accelerometer data */
+            ret = lsm6dsv_acceleration_raw_get(&mgr->ctx, raw_accel);
+            if (ret != 0) {
+                mgr->errors_count++;
+                data->acc_valid = SENSOR_STATUS_ERROR;
+                data->error_code = SENSOR_ERROR_I2C_FAIL;
+            } else if (is_raw_data_invalid(raw_accel)) {
+                /* Data read but appears invalid (all zeros or 0xFFFF) */
+                data->acc_valid = SENSOR_STATUS_ERROR;
+                data->error_code = SENSOR_ERROR_INVALID_DATA;
+            } else {
+                /* Data is valid - convert to physical units */
+                data->acc_x = convert_accel_to_mg(raw_accel[0], mgr->config.xl_fs);
+                data->acc_y = convert_accel_to_mg(raw_accel[1], mgr->config.xl_fs);
+                data->acc_z = convert_accel_to_mg(raw_accel[2], mgr->config.xl_fs);
+
+                /* Software offsets removed - use hardware offsets only */
+
+                data->acc_valid = SENSOR_STATUS_VALID;
+            }
+        }
     }
 
-    /* Read accelerometer raw data */
-    ret = lsm6dsv_acceleration_raw_get(&mgr->ctx, raw_accel);
-    if (ret != 0) {
-        mgr->errors_count++;
-        return -1;
+    /* ========== Process Gyroscope ========== */
+    if (gyro_enabled) {
+        if (!drdy.drdy_gy) {
+            /* Data not ready */
+            data->gyro_valid = SENSOR_STATUS_ERROR;
+            if (data->error_code == SENSOR_ERROR_NONE) {
+                data->error_code = SENSOR_ERROR_NOT_READY;
+            }
+        } else {
+            /* Attempt to read gyroscope data */
+            ret = lsm6dsv_angular_rate_raw_get(&mgr->ctx, raw_gyro);
+            if (ret != 0) {
+                mgr->errors_count++;
+                data->gyro_valid = SENSOR_STATUS_ERROR;
+                if (data->error_code == SENSOR_ERROR_NONE) {
+                    data->error_code = SENSOR_ERROR_I2C_FAIL;
+                }
+            } else if (is_raw_data_invalid(raw_gyro)) {
+                /* Data read but appears invalid */
+                data->gyro_valid = SENSOR_STATUS_ERROR;
+                if (data->error_code == SENSOR_ERROR_NONE) {
+                    data->error_code = SENSOR_ERROR_INVALID_DATA;
+                }
+            } else {
+                /* Data is valid - convert to physical units */
+                data->gyro_x = convert_gyro_to_mdps(raw_gyro[0], mgr->config.gy_fs);
+                data->gyro_y = convert_gyro_to_mdps(raw_gyro[1], mgr->config.gy_fs);
+                data->gyro_z = convert_gyro_to_mdps(raw_gyro[2], mgr->config.gy_fs);
+
+                /* Software offsets removed - gyro has no hardware offset support */
+
+                data->gyro_valid = SENSOR_STATUS_VALID;
+            }
+        }
     }
 
-    /* Read gyroscope raw data */
-    ret = lsm6dsv_angular_rate_raw_get(&mgr->ctx, raw_gyro);
-    if (ret != 0) {
-        mgr->errors_count++;
-        return -1;
-    }
-
-    /* Read temperature */
+    /* ========== Read Temperature (non-critical) ========== */
     ret = lsm6dsv_temperature_raw_get(&mgr->ctx, &raw_temp);
-    if (ret != 0) {
-        /* Temperature read failure is non-critical */
-        raw_temp = 0;
+    if (ret == 0) {
+        data->temp = lsm6dsv_from_lsb_to_celsius(raw_temp);
+    } else {
+        data->temp = 0.0f;
     }
 
-    /* Convert to physical units */
-    data->acc_x = convert_accel_to_mg(raw_accel[0], mgr->config.xl_fs);
-    data->acc_y = convert_accel_to_mg(raw_accel[1], mgr->config.xl_fs);
-    data->acc_z = convert_accel_to_mg(raw_accel[2], mgr->config.xl_fs);
+    /* ========== Update Statistics ========== */
+    /* Only count as successful sample if at least one sensor is valid */
+    if (data->acc_valid == SENSOR_STATUS_VALID || data->gyro_valid == SENSOR_STATUS_VALID) {
+        mgr->samples_read++;
 
-    data->gyro_x = convert_gyro_to_mdps(raw_gyro[0], mgr->config.gy_fs);
-    data->gyro_y = convert_gyro_to_mdps(raw_gyro[1], mgr->config.gy_fs);
-    data->gyro_z = convert_gyro_to_mdps(raw_gyro[2], mgr->config.gy_fs);
+        /* Update current data if at least partial data is valid */
+        memcpy(&mgr->current_data, data, sizeof(sensor_data_t));
 
-    data->temp = lsm6dsv_from_lsb_to_celsius(raw_temp);
+        /* Clear error code if at least one sensor succeeded */
+        if (data->acc_valid == SENSOR_STATUS_VALID && data->gyro_valid == SENSOR_STATUS_VALID) {
+            data->error_code = SENSOR_ERROR_NONE;
+        }
+    }
 
-    /* Apply calibration offsets if enabled */
-    data->acc_x -= mgr->acc_offset[0];
-    data->acc_y -= mgr->acc_offset[1];
-    data->acc_z -= mgr->acc_offset[2];
-
-    data->gyro_x -= mgr->gyro_offset[0];
-    data->gyro_y -= mgr->gyro_offset[1];
-    data->gyro_z -= mgr->gyro_offset[2];
-
-    /* Get timestamp */
-    data->timestamp = platform_get_timestamp();
-
-    /* Update current data */
-    memcpy(&mgr->current_data, data, sizeof(sensor_data_t));
-
-    /* Update statistics */
-    mgr->samples_read++;
-
-    return 0;
+    return 0;  /* Always return success - check validity flags */
 }
 
 /**
@@ -1797,43 +1880,101 @@ int32_t sensor_manager_run_self_test(sensor_manager_t *mgr, bool *xl_pass, bool 
 }
 
 /**
+ * @brief  Convert ODR enum to frequency in Hz
+ * @param  odr: ODR enum value
+ * @retval Frequency in Hz (0 if unknown/off)
+ */
+static float odr_to_hz(lsm6dsv_data_rate_t odr)
+{
+    switch (odr) {
+        case LSM6DSV_ODR_OFF:              return 0.0f;
+        case LSM6DSV_ODR_AT_1Hz875:        return 1.875f;
+        case LSM6DSV_ODR_AT_7Hz5:          return 7.5f;
+        case LSM6DSV_ODR_AT_15Hz:          return 15.0f;
+        case LSM6DSV_ODR_AT_30Hz:          return 30.0f;
+        case LSM6DSV_ODR_AT_60Hz:          return 60.0f;
+        case LSM6DSV_ODR_AT_120Hz:         return 120.0f;
+        case LSM6DSV_ODR_AT_240Hz:         return 240.0f;
+        case LSM6DSV_ODR_AT_480Hz:         return 480.0f;
+        case LSM6DSV_ODR_AT_960Hz:         return 960.0f;
+        default:                           return 120.0f;  /* Default fallback */
+    }
+}
+
+/**
  * @brief  Calibrate sensor offsets
  * @param  mgr: Pointer to sensor manager structure
+ * @param  duration_sec: Duration in seconds to collect samples
+ * @param  acc_offset_out: Output array for accelerometer offsets [x,y,z] in mg
+ * @param  gyro_offset_out: Output array for gyroscope offsets [x,y,z] in mdps
  * @retval 0 on success, -1 on error
  */
-int32_t sensor_manager_calibrate_offsets(sensor_manager_t *mgr)
+int32_t sensor_manager_calibrate_offsets(sensor_manager_t *mgr, uint32_t duration_sec,
+                                          float *acc_offset_out, float *gyro_offset_out)
 {
     int32_t ret;
     sensor_data_t data;
     float acc_sum[3] = {0};
     float gyro_sum[3] = {0};
-    const int num_samples = 100;
+    int num_samples;
+    int samples_collected = 0;
+    float odr_hz;
 
-    if (mgr == NULL || !mgr->initialized) {
+    if (mgr == NULL || !mgr->initialized || acc_offset_out == NULL || gyro_offset_out == NULL) {
         return -1;
+    }
+
+    /* Get current ODR and calculate number of samples */
+    odr_hz = odr_to_hz(mgr->config.xl_odr);
+    if (odr_hz <= 0.0f) {
+        return -1;  /* Sensor not running */
+    }
+
+    /* Calculate number of samples based on duration and ODR */
+    num_samples = (int)(duration_sec * odr_hz);
+    if (num_samples < 10) {
+        num_samples = 10;  /* Minimum 10 samples */
+    }
+
+    /* Calculate delay between samples in ms */
+    uint32_t delay_ms = (uint32_t)((duration_sec * 1000.0f) / num_samples);
+    if (delay_ms < 1) {
+        delay_ms = 1;  /* Minimum 1ms */
     }
 
     /* Collect samples */
     for (int i = 0; i < num_samples; i++) {
         ret = sensor_manager_read_data(mgr, &data);
-        if (ret == 0) {
+        /* Only require accelerometer to be valid (we're primarily calibrating accel) */
+        if (ret == 0 && data.acc_valid == SENSOR_STATUS_VALID) {
             acc_sum[0] += data.acc_x;
             acc_sum[1] += data.acc_y;
-            acc_sum[2] += data.acc_z - 1000.0f;  /* Subtract 1g from Z axis */
-            gyro_sum[0] += data.gyro_x;
-            gyro_sum[1] += data.gyro_y;
-            gyro_sum[2] += data.gyro_z;
+            acc_sum[2] += data.acc_z - 1000.0f;  /* Subtract 1g from Z axis (gravity compensation) */
+
+            /* Also collect gyro data if gyro is valid */
+            if (data.gyro_valid == SENSOR_STATUS_VALID) {
+                gyro_sum[0] += data.gyro_x;
+                gyro_sum[1] += data.gyro_y;
+                gyro_sum[2] += data.gyro_z;
+            }
+            samples_collected++;
         }
-        HAL_Delay(10);
+        HAL_Delay(delay_ms);
+    }
+
+    if (samples_collected < 5) {
+        return -1;  /* Not enough valid samples */
     }
 
     /* Calculate averages as offsets */
-    mgr->acc_offset[0] = acc_sum[0] / num_samples;
-    mgr->acc_offset[1] = acc_sum[1] / num_samples;
-    mgr->acc_offset[2] = acc_sum[2] / num_samples;
-    mgr->gyro_offset[0] = gyro_sum[0] / num_samples;
-    mgr->gyro_offset[1] = gyro_sum[1] / num_samples;
-    mgr->gyro_offset[2] = gyro_sum[2] / num_samples;
+    acc_offset_out[0] = acc_sum[0] / samples_collected;
+    acc_offset_out[1] = acc_sum[1] / samples_collected;
+    acc_offset_out[2] = acc_sum[2] / samples_collected;
+    gyro_offset_out[0] = gyro_sum[0] / samples_collected;
+    gyro_offset_out[1] = gyro_sum[1] / samples_collected;
+    gyro_offset_out[2] = gyro_sum[2] / samples_collected;
+
+    /* Do NOT store in mgr->acc_offset/gyro_offset - we don't want software offsets applied */
 
     return 0;
 }
@@ -1857,6 +1998,114 @@ int32_t sensor_manager_apply_offsets(sensor_manager_t *mgr, bool enable)
     }
 
     return 0;
+}
+
+/* ============================================================================
+ * Hardware Offset Configuration
+ * ============================================================================ */
+
+/**
+ * @brief  Set hardware offset for accelerometer axis
+ * @param  mgr: Pointer to sensor manager structure
+ * @param  axis: Axis index (0=X, 1=Y, 2=Z)
+ * @param  offset_mg: Offset value in mg (±15.875mg range)
+ * @retval 0 on success, -1 on error
+ */
+int32_t sensor_manager_set_xl_offset_hw(sensor_manager_t *mgr, uint8_t axis, float offset_mg)
+{
+    int32_t ret;
+    lsm6dsv_xl_offset_mg_t xl_offset;
+
+    if (mgr == NULL || !mgr->initialized || axis > 2) {
+        return -1;
+    }
+
+    /* Clamp to ±15.875mg coarse mode range */
+    if (offset_mg > 15.875f) offset_mg = 15.875f;
+    if (offset_mg < -15.875f) offset_mg = -15.875f;
+
+    /* Read current offsets first to preserve other axes */
+    ret = lsm6dsv_xl_offset_mg_get(&mgr->ctx, &xl_offset);
+    if (ret != 0) {
+        return ret;
+    }
+
+    /* Update the requested axis */
+    switch (axis) {
+        case 0:  /* X axis */
+            xl_offset.x_mg = offset_mg;
+            mgr->config.xl_offset_x = offset_mg;
+            break;
+        case 1:  /* Y axis */
+            xl_offset.y_mg = offset_mg;
+            mgr->config.xl_offset_y = offset_mg;
+            break;
+        case 2:  /* Z axis */
+            xl_offset.z_mg = offset_mg;
+            mgr->config.xl_offset_z = offset_mg;
+            break;
+        default:
+            return -1;
+    }
+
+    /* Write all offsets back */
+    ret = lsm6dsv_xl_offset_mg_set(&mgr->ctx, xl_offset);
+
+    return ret;
+}
+
+/**
+ * @brief  Get hardware offset for accelerometer axis
+ * @param  mgr: Pointer to sensor manager structure
+ * @param  axis: Axis index (0=X, 1=Y, 2=Z)
+ * @param  offset_mg: Pointer to variable that will hold offset value in mg
+ * @retval 0 on success, -1 on error
+ */
+int32_t sensor_manager_get_xl_offset_hw(sensor_manager_t *mgr, uint8_t axis, float *offset_mg)
+{
+    if (mgr == NULL || !mgr->initialized || offset_mg == NULL || axis > 2) {
+        return -1;
+    }
+
+    /* Return stored config value */
+    switch (axis) {
+        case 0:
+            *offset_mg = mgr->config.xl_offset_x;
+            break;
+        case 1:
+            *offset_mg = mgr->config.xl_offset_y;
+            break;
+        case 2:
+            *offset_mg = mgr->config.xl_offset_z;
+            break;
+        default:
+            return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief  Enable or disable hardware offset application
+ * @param  mgr: Pointer to sensor manager structure
+ * @param  enable: true to enable, false to disable
+ * @retval 0 on success, -1 on error
+ */
+int32_t sensor_manager_enable_xl_offset_hw(sensor_manager_t *mgr, bool enable)
+{
+    int32_t ret;
+
+    if (mgr == NULL || !mgr->initialized) {
+        return -1;
+    }
+
+    /* Enable/disable user offset on output */
+    ret = lsm6dsv_xl_offset_on_out_set(&mgr->ctx, enable ? 1 : 0);
+    if (ret == 0) {
+        mgr->config.xl_offset_en = enable;
+    }
+
+    return ret;
 }
 
 /* ============================================================================
