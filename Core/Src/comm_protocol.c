@@ -462,8 +462,14 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
 
     switch (param_type) {
         case PARAM_ACC_ODR: {
-            float odr_hz = atof(value);
-            lsm6dsv_data_rate_t odr = parse_odr_value(odr_hz);
+            /* Handle explicit OFF/power-down commands */
+            lsm6dsv_data_rate_t odr;
+            if (strcmp(value, "0") == 0 || strcmp(value, "Power Down") == 0 || strcmp(value, "OFF") == 0) {
+                odr = LSM6DSV_ODR_OFF;
+            } else {
+                float odr_hz = atof(value);
+                odr = parse_odr_value(odr_hz);
+            }
             result = sensor_manager_set_xl_odr(comm->sensor_mgr, odr);
             if (result == 0) {
                 comm_protocol_send_response(comm, RESP_OK, NULL);
@@ -474,7 +480,13 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
         }
 
         case PARAM_ACC_FS: {
+            /* Parse value - atoi handles both "2" and "2g" formats */
             int fs_g = atoi(value);
+            /* Validate parsed value is supported */
+            if (fs_g != 2 && fs_g != 4 && fs_g != 8 && fs_g != 16) {
+                comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Invalid ACC FS (use 2, 4, 8, or 16)");
+                break;
+            }
             lsm6dsv_xl_full_scale_t fs = parse_xl_fs_value(fs_g);
             result = sensor_manager_set_xl_fs(comm->sensor_mgr, fs);
             if (result == 0) {
@@ -486,8 +498,14 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
         }
 
         case PARAM_GYRO_ODR: {
-            float odr_hz = atof(value);
-            lsm6dsv_data_rate_t odr = parse_odr_value(odr_hz);
+            /* Handle explicit OFF/power-down commands */
+            lsm6dsv_data_rate_t odr;
+            if (strcmp(value, "0") == 0 || strcmp(value, "Power Down") == 0 || strcmp(value, "OFF") == 0) {
+                odr = LSM6DSV_ODR_OFF;
+            } else {
+                float odr_hz = atof(value);
+                odr = parse_odr_value(odr_hz);
+            }
             result = sensor_manager_set_gy_odr(comm->sensor_mgr, odr);
             if (result == 0) {
                 comm_protocol_send_response(comm, RESP_OK, NULL);
@@ -498,7 +516,14 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
         }
 
         case PARAM_GYRO_FS: {
+            /* Parse value - atoi handles both "250" and "250dps" formats */
             int fs_dps = atoi(value);
+            /* Validate parsed value is supported */
+            if (fs_dps != 125 && fs_dps != 250 && fs_dps != 500 &&
+                fs_dps != 1000 && fs_dps != 2000 && fs_dps != 4000) {
+                comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Invalid GYRO FS (use 125, 250, 500, 1000, 2000, or 4000)");
+                break;
+            }
             lsm6dsv_gy_full_scale_t fs = parse_gy_fs_value(fs_dps);
             result = sensor_manager_set_gy_fs(comm->sensor_mgr, fs);
             if (result == 0) {
@@ -513,10 +538,13 @@ int32_t comm_protocol_handle_set(comm_protocol_t *comm, const char *param, const
             float odr_hz = atof(value);
             int32_t odr_val = parse_sflp_odr_value(odr_hz);
             if (odr_val >= 0) {
-                /* SFLP ODR is set via game rotation vector config */
-                /* For now, just acknowledge - full implementation would use sensor_manager API */
-                result = 0;
-                comm_protocol_send_response(comm, RESP_OK, NULL);
+                /* Set SFLP ODR via sensor manager */
+                result = sensor_manager_set_sflp_odr(comm->sensor_mgr, (uint8_t)odr_val);
+                if (result == 0) {
+                    comm_protocol_send_response(comm, RESP_OK, NULL);
+                } else {
+                    comm_protocol_send_response(comm, RESP_SENSOR_ERROR, "Failed to set SFLP ODR");
+                }
             } else {
                 comm_protocol_send_response(comm, RESP_INVALID_PARAM, "Invalid SFLP ODR");
             }
@@ -1591,7 +1619,13 @@ static lsm6dsv_data_rate_t parse_odr_value(float odr_hz)
 {
     /* Map standard ODR values to enums first (covers common use cases) */
     if (odr_hz <= 0.5f) return LSM6DSV_ODR_OFF;  /* Only explicit zero/very low values power down */
-    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;  /* 1.875 Hz - now works correctly! */
+
+    /* Check for 1.875 Hz with tolerance (1.8-2.0 Hz range) */
+    if (odr_hz >= 1.8f && odr_hz <= 2.0f) return LSM6DSV_ODR_AT_1Hz875;
+
+    /* If less than 5 Hz but not in 1.875 range, still use 1.875 (closest low ODR) */
+    if (odr_hz < 5.0f) return LSM6DSV_ODR_AT_1Hz875;  /* 1.875 Hz */
+
     if (odr_hz < 11.0f) return LSM6DSV_ODR_AT_7Hz5;   /* 7.5 Hz */
     if (odr_hz < 12.0f) return LSM6DSV_ODR_AT_15Hz;   /* 15 Hz - before HA2 12.5 Hz check */
 

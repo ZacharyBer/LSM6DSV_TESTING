@@ -11,6 +11,7 @@
 #include "platform_i2c.h"
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* Private defines -----------------------------------------------------------*/
 #define SENSOR_RESET_TIMEOUT_MS    500   // Increased from 100ms for reliable reset
@@ -672,15 +673,17 @@ int32_t sensor_manager_read_data(sensor_manager_t *mgr, sensor_data_t *data)
  */
 int32_t sensor_manager_read_sflp(sensor_manager_t *mgr, sflp_data_t *data)
 {
-    /* NOTE: The current LSM6DSV driver does not expose direct quaternion register access.
-     * The SFLP can be enabled, but reading the quaternion data requires either:
-     * 1. Updated driver with quaternion read functions
-     * 2. Direct register access to SFLP output registers
-     * 3. Reading from sensor hub if configured
-     *
-     * For now, this is a placeholder implementation.
-     * The main.c code also has this limitation (see LSM6DSV_ReadSFLP function).
+    /* Implementation based on IMU-TESTER project:
+     * SFLP quaternion data is retrieved from FIFO using tag-based parsing.
+     * The game rotation vector (tag 0x13) contains a compressed quaternion
+     * with only X, Y, Z components (6 bytes). The W component is derived
+     * using the normalization constraint: w = sqrt(1 - x^2 - y^2 - z^2).
      */
+
+    lsm6dsv_fifo_status_t fifo_status;
+    lsm6dsv_fifo_out_raw_t fifo_data;
+    uint16_t fifo_level;
+    int32_t ret;
 
     if (mgr == NULL || data == NULL || !mgr->initialized) {
         return -1;
@@ -690,11 +693,68 @@ int32_t sensor_manager_read_sflp(sensor_manager_t *mgr, sflp_data_t *data)
         return -1;  /* SFLP not enabled */
     }
 
-    /* TODO: Implement when quaternion registers are exposed in driver */
-    /* For now, return zeros */
+    /* Initialize data to zeros in case we don't find SFLP data */
     memset(data, 0, sizeof(sflp_data_t));
 
-    return 0;
+    /* Get FIFO status to determine how many entries are available */
+    ret = lsm6dsv_fifo_status_get(&mgr->ctx, &fifo_status);
+    if (ret != 0) {
+        return -1;
+    }
+
+    fifo_level = fifo_status.fifo_level;
+
+    /* Read FIFO data and look for SFLP game rotation vector tag (0x13) */
+    while (fifo_level > 0)
+    {
+        /* Read one FIFO entry (7 bytes: 1 tag + 6 data) */
+        ret = lsm6dsv_fifo_out_raw_get(&mgr->ctx, &fifo_data);
+        if (ret != 0) {
+            return -1;
+        }
+        fifo_level--;
+
+        /* Check if this is SFLP game rotation vector data (tag 0x13) */
+        if (fifo_data.tag == LSM6DSV_SFLP_GAME_ROTATION_VECTOR_TAG)
+        {
+            /* Game rotation vector is a compressed quaternion (3 components)
+             * The 6 bytes contain 3x 16-bit signed values representing x, y, z
+             * The w component is derived: w = sqrt(1 - x^2 - y^2 - z^2)
+             * Values are normalized such that sqrt(x^2 + y^2 + z^2 + w^2) = 1
+             */
+            int16_t quat_raw[3];
+
+            /* Extract 16-bit quaternion components (little-endian) */
+            quat_raw[0] = (int16_t)((fifo_data.data[1] << 8) | fifo_data.data[0]);  /* x */
+            quat_raw[1] = (int16_t)((fifo_data.data[3] << 8) | fifo_data.data[2]);  /* y */
+            quat_raw[2] = (int16_t)((fifo_data.data[5] << 8) | fifo_data.data[4]);  /* z */
+
+            /* Convert to float (normalized to ±1, scale factor is 2^14 = 16384) */
+            data->quat_x = (float)quat_raw[0] / 16384.0f;
+            data->quat_y = (float)quat_raw[1] / 16384.0f;
+            data->quat_z = (float)quat_raw[2] / 16384.0f;
+
+            /* Calculate w component: w = sqrt(1 - x^2 - y^2 - z^2) */
+            float sum_sq = data->quat_x * data->quat_x +
+                          data->quat_y * data->quat_y +
+                          data->quat_z * data->quat_z;
+
+            if (sum_sq < 1.0f)
+            {
+                data->quat_w = sqrtf(1.0f - sum_sq);  /* Derive W from XYZ */
+            }
+            else
+            {
+                data->quat_w = 0.0f;  /* Handle edge case where sum > 1 */
+            }
+
+            /* We found and processed the SFLP data, return success */
+            return 0;
+        }
+    }
+
+    /* No SFLP data found in FIFO */
+    return -1;
 }
 
 /* ============================================================================
@@ -992,14 +1052,58 @@ int32_t sensor_manager_set_gy_lpf1(sensor_manager_t *mgr, bool enable, lsm6dsv_f
 int32_t sensor_manager_enable_sflp(sensor_manager_t *mgr, bool enable)
 {
     int32_t ret;
+    lsm6dsv_fifo_sflp_raw_t sflp_fifo;
 
     if (mgr == NULL || !mgr->initialized) {
         return -1;
     }
 
-    ret = lsm6dsv_sflp_game_rotation_set(&mgr->ctx, enable ? 1 : 0);
-    if (ret != 0) {
-        return -1;
+    if (enable) {
+        /* Enable SFLP game rotation */
+        ret = lsm6dsv_sflp_game_rotation_set(&mgr->ctx, 1);
+        if (ret != 0) {
+            return -1;
+        }
+
+        /* Configure FIFO to batch SFLP data (based on IMU-TESTER implementation) */
+        sflp_fifo.game_rotation = 1;  /* Enable game rotation vector in FIFO */
+        sflp_fifo.gravity = 0;        /* Disable gravity vector */
+        sflp_fifo.gbias = 0;          /* Disable gyro bias output */
+        ret = lsm6dsv_fifo_sflp_batch_set(&mgr->ctx, sflp_fifo);
+        if (ret != 0) {
+            return -1;
+        }
+
+        /* Set FIFO to stream mode for continuous operation */
+        ret = lsm6dsv_fifo_mode_set(&mgr->ctx, LSM6DSV_STREAM_MODE);
+        if (ret != 0) {
+            return -1;
+        }
+
+        mgr->config.fifo_mode = LSM6DSV_STREAM_MODE;
+    } else {
+        /* Disable SFLP game rotation */
+        ret = lsm6dsv_sflp_game_rotation_set(&mgr->ctx, 0);
+        if (ret != 0) {
+            return -1;
+        }
+
+        /* Disable FIFO batching for SFLP */
+        sflp_fifo.game_rotation = 0;
+        sflp_fifo.gravity = 0;
+        sflp_fifo.gbias = 0;
+        ret = lsm6dsv_fifo_sflp_batch_set(&mgr->ctx, sflp_fifo);
+        if (ret != 0) {
+            return -1;
+        }
+
+        /* Set FIFO back to bypass mode */
+        ret = lsm6dsv_fifo_mode_set(&mgr->ctx, LSM6DSV_BYPASS_MODE);
+        if (ret != 0) {
+            return -1;
+        }
+
+        mgr->config.fifo_mode = LSM6DSV_BYPASS_MODE;
     }
 
     mgr->config.sflp_game_en = enable;

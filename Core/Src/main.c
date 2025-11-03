@@ -81,6 +81,10 @@ volatile uint16_t uart_rx_read_pos = 0;   // Our read position (updated by main 
 static sensor_manager_t sensor_mgr;
 comm_protocol_t comm_ctx;
 
+/* Cache for last valid sensor data (prevents zero readings when ODRs differ) */
+static sensor_data_t last_valid_data = {0};
+static bool first_valid_gyro = false;  // Track if we've received at least one valid gyro sample
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -298,17 +302,41 @@ int main(void)
         /* Read sensor data (v3.1: always succeeds, check validity flags) */
         sensor_manager_read_data(&sensor_mgr, &data);
 
-        /* Transmit if at least one sensor has valid data
-         * - acc_valid==1 OR gyro_valid==1: at least one sensor working
-         * - Drop samples only if BOTH sensors are error/disabled (neither is valid)
-         * - This supports acc-only, gyro-only, and both configurations */
-        bool has_valid_data = (data.acc_valid == SENSOR_STATUS_VALID) ||
-                              (data.gyro_valid == SENSOR_STATUS_VALID);
+        /* Update cache when sensors have new valid data (v3.2: prevents zero gyro readings)
+         * Strategy: Cache last valid readings from both sensors, only transmit when
+         * we have complete data. This handles different ODR configurations correctly.
+         * Example: If accel=240Hz and gyro=120Hz, gyro data repeats until next update. */
 
-        if (has_valid_data) {
-            /* Format as CSV with validity flags */
+        /* Update accelerometer cache */
+        if (data.acc_valid == SENSOR_STATUS_VALID) {
+            last_valid_data.acc_x = data.acc_x;
+            last_valid_data.acc_y = data.acc_y;
+            last_valid_data.acc_z = data.acc_z;
+            last_valid_data.acc_valid = SENSOR_STATUS_VALID;
+            last_valid_data.timestamp = data.timestamp;  // Use latest timestamp
+        }
+
+        /* Update gyroscope cache */
+        if (data.gyro_valid == SENSOR_STATUS_VALID) {
+            last_valid_data.gyro_x = data.gyro_x;
+            last_valid_data.gyro_y = data.gyro_y;
+            last_valid_data.gyro_z = data.gyro_z;
+            last_valid_data.gyro_valid = SENSOR_STATUS_VALID;
+            first_valid_gyro = true;  // Mark that we've seen at least one valid gyro sample
+        }
+
+        /* Transmit only if both sensors have valid data in cache
+         * - Requires both sensors to have been valid at least once
+         * - Prevents zero gyro readings when accel ODR > gyro ODR
+         * - Gyro data repeats at accel rate until next gyro update (standard decimation) */
+        bool has_complete_data = first_valid_gyro &&
+                                 (last_valid_data.acc_valid == SENSOR_STATUS_VALID) &&
+                                 (last_valid_data.gyro_valid == SENSOR_STATUS_VALID);
+
+        if (has_complete_data) {
+            /* Format as CSV using cached complete data */
             char buffer[256];
-            int len = data_formatter_csv_data(buffer, sizeof(buffer), &data, NULL, NULL);
+            int len = data_formatter_csv_data(buffer, sizeof(buffer), &last_valid_data, NULL, NULL);
 
             if (len > 0) {
                 HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 10);
@@ -318,14 +346,14 @@ int main(void)
             if (sensor_mgr.config.sflp_game_en) {
                 sflp_data_t sflp;
                 if (sensor_manager_read_sflp(&sensor_mgr, &sflp) == 0) {
-                    len = data_formatter_csv_sflp(buffer, sizeof(buffer), &sflp, data.timestamp);
+                    len = data_formatter_csv_sflp(buffer, sizeof(buffer), &sflp, last_valid_data.timestamp);
                     if (len > 0) {
                         HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 10);
                     }
                 }
             }
         }
-        /* If no valid data (both sensors error/disabled), drop this sample silently */
+        /* If no complete data yet (waiting for first gyro sample), drop this sample silently */
     }
 
     /* USER CODE END WHILE */

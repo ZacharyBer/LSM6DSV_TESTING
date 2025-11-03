@@ -27,7 +27,7 @@ class LSM6DSV_GUI:
     def __init__(self, root):
         self.root = root
         self.root.title("LSM6DSV Sensor Interface")
-        self.root.geometry("1400x900")
+        self.root.geometry("1940x1200")
 
         # Serial communication
         self.serial_port = None
@@ -176,7 +176,7 @@ class LSM6DSV_GUI:
     def map_gy_fs_to_string(self, fs_enum):
         """Convert gyroscope full scale enum to string"""
         fs_map = {0: "±125 dps", 1: "±250 dps", 2: "±500 dps",
-                  3: "±1000 dps", 4: "±2000 dps", 5: "±4000 dps"}
+                  3: "±1000 dps", 4: "±2000 dps", 12: "±4000 dps"}  # 0xC = 12 decimal
         return fs_map.get(fs_enum, f"Unknown ({fs_enum})")
 
     def map_xl_mode_to_string(self, mode_enum):
@@ -650,136 +650,143 @@ class LSM6DSV_GUI:
         # Calibrate button (moved from Embedded Functions tab)
         ttk.Label(offset_group, text="Calibration:", font=("Arial", 9, "bold")).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
-        # Improved calibration instructions with clear orientation guidance
-        instructions_text = (
-            "📋 BEFORE Calibrating:\n"
-            "  ✓ Place sensor on FLAT, LEVEL surface\n"
-            "  ✓ Z-axis pointing UP (perpendicular to table)\n"
-            "  ✓ Keep sensor STATIONARY during calibration"
-        )
-        ttk.Label(offset_group, text=instructions_text, font=("Arial", 8), foreground="#0066cc", justify=tk.LEFT).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
-
         # Duration input
-        ttk.Label(offset_group, text="Duration (sec):").grid(row=6, column=0, sticky=tk.W, pady=3)
+        ttk.Label(offset_group, text="Duration (sec):").grid(row=5, column=0, sticky=tk.W, pady=3)
         self.calibrate_duration_var = tk.IntVar(value=5)
-        ttk.Spinbox(offset_group, textvariable=self.calibrate_duration_var, from_=1, to=30, width=8).grid(row=6, column=1, pady=3, sticky=tk.W)
+        ttk.Spinbox(offset_group, textvariable=self.calibrate_duration_var, from_=1, to=30, width=8).grid(row=5, column=1, pady=3, sticky=tk.W)
 
         # Calibrate button with status label
-        self.calibrate_button = ttk.Button(offset_group, text="🎯 Calibrate & Auto-Populate",
+        self.calibrate_button = ttk.Button(offset_group, text="Calibrate & Auto-Populate",
                    command=self.calibrate_offsets)
-        self.calibrate_button.grid(row=7, column=0, columnspan=2, pady=5, sticky=(tk.W, tk.E))
+        self.calibrate_button.grid(row=6, column=0, columnspan=2, pady=5, sticky=(tk.W, tk.E))
 
         # Calibration status label
         self.calibration_status_var = tk.StringVar(value="")
         self.calibration_status_label = ttk.Label(offset_group, textvariable=self.calibration_status_var,
                                                    font=("Arial", 8, "italic"), foreground="gray")
-        self.calibration_status_label.grid(row=7, column=2, columnspan=2, pady=5, sticky=tk.W, padx=(10, 0))
+        self.calibration_status_label.grid(row=6, column=2, columnspan=2, pady=5, sticky=tk.W, padx=(10, 0))
 
         # Validation label (range: ±15.875mg)
-        ttk.Label(offset_group, text="Valid range: ±15.875 mg", font=("Arial", 8), foreground="gray").grid(row=8, column=0, columnspan=4, pady=(10, 0), sticky=tk.W)
+        ttk.Label(offset_group, text="Valid range: ±15.875 mg", font=("Arial", 8), foreground="gray").grid(row=7, column=0, columnspan=4, pady=(10, 0), sticky=tk.W)
 
         # --- Control Buttons (Row 3, Col 1) ---
         button_group = ttk.LabelFrame(config_frame, text="Configuration Control", padding="10")
         button_group.grid(row=3, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        ttk.Button(button_group, text="🔄 Refresh Config",
+        ttk.Button(button_group, text="Refresh Config",
                    command=self.refresh_config).pack(fill=tk.X, pady=5, padx=5)
 
+        # Apply All Settings
         ttk.Label(button_group, text="Apply all settings to device:",
                   font=("Arial", 9)).pack(pady=(10,5))
-        ttk.Button(button_group, text="⚡ APPLY ALL ⚡",
+        ttk.Button(button_group, text="APPLY ALL",
                    command=self.apply_all_settings,
                    style="Accent.TButton").pack(fill=tk.X, pady=5, padx=5)
 
-        # ===== Tab 4: Interrupt Events & Embedded Functions =====
-        interrupt_frame = ttk.Frame(notebook, padding="5")
-        notebook.add(interrupt_frame, text="Embedded Functions")
+        # Power Mode Presets (vertical stack)
+        ttk.Label(button_group, text="Power Mode Presets:", font=("Arial", 9, "bold")).pack(pady=(10,5))
 
-        # Create sub-notebook for interrupt functions
-        int_notebook = ttk.Notebook(interrupt_frame)
-        int_notebook.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(button_group, text="Ultra Low Power (~4 µA)",
+                   command=self.apply_preset_ultra_low).pack(fill=tk.X, pady=2, padx=5)
+        ttk.Button(button_group, text="Low Power IMU (~25 µA)",
+                   command=self.apply_preset_low_power).pack(fill=tk.X, pady=2, padx=5)
+        ttk.Button(button_group, text="Balanced Power (~100 µA)",
+                   command=self.apply_preset_balanced).pack(fill=tk.X, pady=2, padx=5)
+        ttk.Button(button_group, text="Standard Perf (~500 µA)",
+                   command=self.apply_preset_standard).pack(fill=tk.X, pady=2, padx=5)
+        ttk.Button(button_group, text="High Performance (~1.5 mA)",
+                   command=self.apply_preset_high_perf).pack(fill=tk.X, pady=2, padx=5)
+        ttk.Button(button_group, text="Max Performance (~3 mA)",
+                   command=self.apply_preset_max_perf).pack(fill=tk.X, pady=2, padx=5)
 
-        # --- Sub-tab 1: Tap Detection ---
-        tap_config_frame = ttk.Frame(int_notebook, padding="10")
-        int_notebook.add(tap_config_frame, text="Tap Detection")
+        # ===== Tab 4: Embedded Functions (Single Condensed Tab) =====
+        emb_frame = ttk.Frame(notebook, padding="5")
+        notebook.add(emb_frame, text="Embedded Functions")
 
-        # Enable/Disable
-        tap_control_group = ttk.LabelFrame(tap_config_frame, text="Tap Control", padding="10")
-        tap_control_group.grid(row=0, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+        # Create canvas and scrollbar for scrollable content
+        canvas = tk.Canvas(emb_frame)
+        scrollbar = ttk.Scrollbar(emb_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
 
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # ===== LEFT COLUMN =====
+        # Section 1: Tap Detection
+        tap_config_frame = ttk.LabelFrame(scrollable_frame, text="Tap Detection", padding="10")
+        tap_config_frame.grid(row=0, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+
+        # Enable checkbox
         self.tap_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(tap_control_group, text="Enable Tap Detection", variable=self.tap_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.tap_enabled_var.get() else 'DISABLE'}:TAP")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=2)
+        ttk.Checkbutton(tap_config_frame, text="Enable Tap Detection", variable=self.tap_enabled_var,
+                       command=lambda: self.send_command(f"{'ENABLE' if self.tap_enabled_var.get() else 'DISABLE'}:TAP")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=3)
 
         # Thresholds
-        tap_thresh_group = ttk.LabelFrame(tap_config_frame, text="Tap Thresholds (0-31)", padding="10")
-        tap_thresh_group.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
-        ttk.Label(tap_thresh_group, text="X Threshold:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="X Threshold:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.tap_thresh_x_var = tk.StringVar(value="15")
-        ttk.Entry(tap_thresh_group, textvariable=self.tap_thresh_x_var, width=8).grid(row=0, column=1, pady=5)
-        ttk.Button(tap_thresh_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_X:{self.tap_thresh_x_var.get()}")).grid(row=0, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_thresh_x_var, width=8).grid(row=2, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_X:{self.tap_thresh_x_var.get()}")).grid(row=2, column=2, padx=5)
 
-        ttk.Label(tap_thresh_group, text="Y Threshold:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="Y Threshold:").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.tap_thresh_y_var = tk.StringVar(value="15")
-        ttk.Entry(tap_thresh_group, textvariable=self.tap_thresh_y_var, width=8).grid(row=1, column=1, pady=5)
-        ttk.Button(tap_thresh_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_Y:{self.tap_thresh_y_var.get()}")).grid(row=1, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_thresh_y_var, width=8).grid(row=3, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_Y:{self.tap_thresh_y_var.get()}")).grid(row=3, column=2, padx=5)
 
-        ttk.Label(tap_thresh_group, text="Z Threshold:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="Z Threshold:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.tap_thresh_z_var = tk.StringVar(value="15")
-        ttk.Entry(tap_thresh_group, textvariable=self.tap_thresh_z_var, width=8).grid(row=2, column=1, pady=5)
-        ttk.Button(tap_thresh_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_Z:{self.tap_thresh_z_var.get()}")).grid(row=2, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_thresh_z_var, width=8).grid(row=4, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_THRESHOLD_Z:{self.tap_thresh_z_var.get()}")).grid(row=4, column=2, padx=5)
 
-        # Timing Parameters
-        tap_timing_group = ttk.LabelFrame(tap_config_frame, text="Tap Timing", padding="10")
-        tap_timing_group.grid(row=2, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
-        ttk.Label(tap_timing_group, text="Shock (0-3):").grid(row=0, column=0, sticky=tk.W, pady=5)
+        # Timing
+        ttk.Label(tap_config_frame, text="Timing:").grid(row=5, column=0, sticky=tk.W, pady=5, columnspan=3)
+        ttk.Label(tap_config_frame, text="Shock (0-3):").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.tap_shock_var = tk.StringVar(value="2")
-        ttk.Entry(tap_timing_group, textvariable=self.tap_shock_var, width=8).grid(row=0, column=1, pady=5)
-        ttk.Button(tap_timing_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_SHOCK:{self.tap_shock_var.get()}")).grid(row=0, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_shock_var, width=8).grid(row=6, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_SHOCK:{self.tap_shock_var.get()}")).grid(row=6, column=2, padx=5)
 
-        ttk.Label(tap_timing_group, text="Quiet (0-3):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="Quiet (0-3):").grid(row=7, column=0, sticky=tk.W, pady=5)
         self.tap_quiet_var = tk.StringVar(value="2")
-        ttk.Entry(tap_timing_group, textvariable=self.tap_quiet_var, width=8).grid(row=1, column=1, pady=5)
-        ttk.Button(tap_timing_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_QUIET:{self.tap_quiet_var.get()}")).grid(row=1, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_quiet_var, width=8).grid(row=7, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_QUIET:{self.tap_quiet_var.get()}")).grid(row=7, column=2, padx=5)
 
-        ttk.Label(tap_timing_group, text="Latency (0-15):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="Latency (0-15):").grid(row=8, column=0, sticky=tk.W, pady=5)
         self.tap_latency_var = tk.StringVar(value="4")
-        ttk.Entry(tap_timing_group, textvariable=self.tap_latency_var, width=8).grid(row=2, column=1, pady=5)
-        ttk.Button(tap_timing_group, text="Apply", command=lambda: self.send_command(f"SET:TAP_LATENCY:{self.tap_latency_var.get()}")).grid(row=2, column=2, padx=5)
+        ttk.Entry(tap_config_frame, textvariable=self.tap_latency_var, width=8).grid(row=8, column=1, pady=5)
+        ttk.Button(tap_config_frame, text="Apply", command=lambda: self.send_command(f"SET:TAP_LATENCY:{self.tap_latency_var.get()}")).grid(row=8, column=2, padx=5)
 
         # Axes and Mode
-        tap_axes_group = ttk.LabelFrame(tap_config_frame, text="Tap Axes & Mode", padding="10")
-        tap_axes_group.grid(row=3, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
+        ttk.Label(tap_config_frame, text="Axes:").grid(row=9, column=0, sticky=tk.W, pady=5, columnspan=3)
         self.tap_x_en_var = tk.BooleanVar(value=True)
         self.tap_y_en_var = tk.BooleanVar(value=True)
         self.tap_z_en_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tap_axes_group, text="X Axis", variable=self.tap_x_en_var).grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Checkbutton(tap_axes_group, text="Y Axis", variable=self.tap_y_en_var).grid(row=0, column=1, sticky=tk.W, pady=5)
-        ttk.Checkbutton(tap_axes_group, text="Z Axis", variable=self.tap_z_en_var).grid(row=0, column=2, sticky=tk.W, pady=5)
-        ttk.Button(tap_axes_group, text="Apply Axes",
-                   command=lambda: self.send_command(f"SET:TAP_AXES:{'1' if self.tap_x_en_var.get() else '0'}{'1' if self.tap_y_en_var.get() else '0'}{'1' if self.tap_z_en_var.get() else '0'}")).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(tap_config_frame, text="X", variable=self.tap_x_en_var).grid(row=10, column=0, sticky=tk.W, pady=5)
+        ttk.Checkbutton(tap_config_frame, text="Y", variable=self.tap_y_en_var).grid(row=10, column=1, sticky=tk.W, pady=5)
+        ttk.Checkbutton(tap_config_frame, text="Z", variable=self.tap_z_en_var).grid(row=10, column=2, sticky=tk.W, pady=5)
+        ttk.Button(tap_config_frame, text="Apply Axes",
+                   command=lambda: self.send_command(f"SET:TAP_AXES:{'1' if self.tap_x_en_var.get() else '0'}{'1' if self.tap_y_en_var.get() else '0'}{'1' if self.tap_z_en_var.get() else '0'}")).grid(row=11, column=0, columnspan=3, pady=5)
 
-        ttk.Label(tap_axes_group, text="Mode:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(tap_config_frame, text="Mode:").grid(row=12, column=0, sticky=tk.W, pady=5)
         self.tap_mode_var = tk.StringVar(value="Single + Double")
-        ttk.Combobox(tap_axes_group, textvariable=self.tap_mode_var,
-                     values=["Single Only", "Single + Double"], width=15).grid(row=1, column=1, columnspan=2, pady=5)
-        ttk.Button(tap_axes_group, text="Apply Mode",
-                   command=lambda: self.send_command(f"SET:TAP_MODE:{0 if self.tap_mode_var.get() == 'Single Only' else 1}")).grid(row=1, column=3, padx=5)
+        ttk.Combobox(tap_config_frame, textvariable=self.tap_mode_var,
+                     values=["Single Only", "Single + Double"], width=18).grid(row=12, column=1, columnspan=2, pady=5, sticky=tk.W)
+        ttk.Button(tap_config_frame, text="Apply Mode",
+                   command=lambda: self.send_command(f"SET:TAP_MODE:{0 if self.tap_mode_var.get() == 'Single Only' else 1}")).grid(row=13, column=0, columnspan=3, pady=5)
 
-        # --- Sub-tab 2: Wake-Up & Free Fall ---
-        wake_ff_frame = ttk.Frame(int_notebook, padding="10")
-        int_notebook.add(wake_ff_frame, text="Wake-Up & Free Fall")
-
-        # Wake-Up
-        wake_group = ttk.LabelFrame(wake_ff_frame, text="Wake-Up Detection", padding="10")
-        wake_group.grid(row=0, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+        # Section 2: Wake-Up Detection
+        wake_group = ttk.LabelFrame(scrollable_frame, text="Wake-Up Detection", padding="10")
+        wake_group.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
 
         self.wake_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(wake_group, text="Enable Wake-Up", variable=self.wake_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.wake_enabled_var.get() else 'DISABLE'}:WAKE_UP")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=2)
+                       command=lambda: self.send_command(f"{'ENABLE' if self.wake_enabled_var.get() else 'DISABLE'}:WAKE_UP")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=3)
 
         ttk.Label(wake_group, text="Threshold (0-63):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.wake_thresh_var = tk.StringVar(value="20")
@@ -791,22 +798,38 @@ class LSM6DSV_GUI:
         ttk.Entry(wake_group, textvariable=self.wake_dur_var, width=8).grid(row=2, column=1, pady=5)
         ttk.Button(wake_group, text="Apply", command=lambda: self.send_command(f"SET:WAKE_DURATION:{self.wake_dur_var.get()}")).grid(row=2, column=2, padx=5)
 
+        ttk.Label(wake_group, text="Axes:").grid(row=3, column=0, sticky=tk.W, pady=5, columnspan=3)
         self.wake_x_en_var = tk.BooleanVar(value=True)
         self.wake_y_en_var = tk.BooleanVar(value=True)
         self.wake_z_en_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(wake_group, text="X Axis", variable=self.wake_x_en_var).grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Checkbutton(wake_group, text="Y Axis", variable=self.wake_y_en_var).grid(row=3, column=1, sticky=tk.W, pady=5)
-        ttk.Checkbutton(wake_group, text="Z Axis", variable=self.wake_z_en_var).grid(row=3, column=2, sticky=tk.W, pady=5)
+        ttk.Checkbutton(wake_group, text="X", variable=self.wake_x_en_var).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Checkbutton(wake_group, text="Y", variable=self.wake_y_en_var).grid(row=4, column=1, sticky=tk.W, pady=5)
+        ttk.Checkbutton(wake_group, text="Z", variable=self.wake_z_en_var).grid(row=4, column=2, sticky=tk.W, pady=5)
         ttk.Button(wake_group, text="Apply Axes",
-                   command=lambda: self.send_command(f"SET:WAKE_AXES:{'1' if self.wake_x_en_var.get() else '0'}{'1' if self.wake_y_en_var.get() else '0'}{'1' if self.wake_z_en_var.get() else '0'}")).grid(row=4, column=0, columnspan=3, pady=5)
+                   command=lambda: self.send_command(f"SET:WAKE_AXES:{'1' if self.wake_x_en_var.get() else '0'}{'1' if self.wake_y_en_var.get() else '0'}{'1' if self.wake_z_en_var.get() else '0'}")).grid(row=5, column=0, columnspan=3, pady=5)
 
-        # Free Fall
-        ff_group = ttk.LabelFrame(wake_ff_frame, text="Free Fall Detection", padding="10")
-        ff_group.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+        # Section 3: 6D Orientation
+        sixd_group = ttk.LabelFrame(scrollable_frame, text="6D Orientation", padding="10")
+        sixd_group.grid(row=2, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+
+        self.sixd_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sixd_group, text="Enable 6D Detection", variable=self.sixd_enabled_var,
+                       command=lambda: self.send_command(f"{'ENABLE' if self.sixd_enabled_var.get() else 'DISABLE'}:6D")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=3)
+
+        ttk.Label(sixd_group, text="Threshold:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.sixd_thresh_var = tk.StringVar(value="60")
+        ttk.Combobox(sixd_group, textvariable=self.sixd_thresh_var,
+                     values=["50", "60", "70", "80"], width=8).grid(row=1, column=1, pady=5)
+        ttk.Button(sixd_group, text="Apply", command=lambda: self.send_command(f"SET:6D_THRESHOLD:{self.sixd_thresh_var.get()}")).grid(row=1, column=2, padx=5)
+
+        # ===== RIGHT COLUMN =====
+        # Section 4: Free Fall Detection
+        ff_group = ttk.LabelFrame(scrollable_frame, text="Free Fall Detection", padding="10")
+        ff_group.grid(row=0, column=1, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
 
         self.ff_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(ff_group, text="Enable Free Fall", variable=self.ff_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.ff_enabled_var.get() else 'DISABLE'}:FREE_FALL")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=2)
+                       command=lambda: self.send_command(f"{'ENABLE' if self.ff_enabled_var.get() else 'DISABLE'}:FREE_FALL")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=3)
 
         ttk.Label(ff_group, text="Threshold (0-7):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.ff_thresh_var = tk.StringVar(value="3")
@@ -819,74 +842,45 @@ class LSM6DSV_GUI:
         ttk.Entry(ff_group, textvariable=self.ff_dur_var, width=8).grid(row=2, column=1, pady=5)
         ttk.Button(ff_group, text="Apply", command=lambda: self.send_command(f"SET:FF_DURATION:{self.ff_dur_var.get()}")).grid(row=2, column=2, padx=5)
 
-        # --- Sub-tab 3: 6D, Tilt, Motion ---
-        motion_frame = ttk.Frame(int_notebook, padding="10")
-        int_notebook.add(motion_frame, text="6D, Tilt & Motion")
-
-        # 6D Orientation
-        sixd_group = ttk.LabelFrame(motion_frame, text="6D Orientation", padding="10")
-        sixd_group.grid(row=0, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
-        self.sixd_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(sixd_group, text="Enable 6D Detection", variable=self.sixd_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.sixd_enabled_var.get() else 'DISABLE'}:6D")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=2)
-
-        ttk.Label(sixd_group, text="Threshold:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.sixd_thresh_var = tk.StringVar(value="60")
-        ttk.Combobox(sixd_group, textvariable=self.sixd_thresh_var,
-                     values=["50", "60", "70", "80"], width=8).grid(row=1, column=1, pady=5)
-        ttk.Button(sixd_group, text="Apply", command=lambda: self.send_command(f"SET:6D_THRESHOLD:{self.sixd_thresh_var.get()}")).grid(row=1, column=2, padx=5)
-
-        # Tilt
-        tilt_group = ttk.LabelFrame(motion_frame, text="Tilt Detection", padding="10")
-        tilt_group.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
+        # Section 5: Motion Detection
+        motion_group = ttk.LabelFrame(scrollable_frame, text="Motion Detection", padding="10")
+        motion_group.grid(row=1, column=1, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
 
         self.tilt_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(tilt_group, text="Enable Tilt Detection", variable=self.tilt_enabled_var,
+        ttk.Checkbutton(motion_group, text="Enable Tilt Detection", variable=self.tilt_enabled_var,
                        command=lambda: self.send_command(f"{'ENABLE' if self.tilt_enabled_var.get() else 'DISABLE'}:TILT")).grid(row=0, column=0, sticky=tk.W, pady=5)
 
-        # Significant Motion
-        sigmo_group = ttk.LabelFrame(motion_frame, text="Significant Motion", padding="10")
-        sigmo_group.grid(row=2, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
         self.sigmo_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(sigmo_group, text="Enable Significant Motion", variable=self.sigmo_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.sigmo_enabled_var.get() else 'DISABLE'}:SIG_MOTION")).grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Checkbutton(motion_group, text="Enable Significant Motion", variable=self.sigmo_enabled_var,
+                       command=lambda: self.send_command(f"{'ENABLE' if self.sigmo_enabled_var.get() else 'DISABLE'}:SIG_MOTION")).grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        # --- Sub-tab 4: Step Counter & Calibration ---
-        step_cal_frame = ttk.Frame(int_notebook, padding="10")
-        int_notebook.add(step_cal_frame, text="Step & Cal")
+        # Section 6: Activity Tracking & Diagnostics
+        activity_group = ttk.LabelFrame(scrollable_frame, text="Activity Tracking & Diagnostics", padding="10")
+        activity_group.grid(row=2, column=1, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
 
         # Step Counter
-        step_group = ttk.LabelFrame(step_cal_frame, text="Step Counter", padding="10")
-        step_group.grid(row=0, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
         self.step_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(step_group, text="Enable Step Counter", variable=self.step_enabled_var,
-                       command=lambda: self.send_command(f"{'ENABLE' if self.step_enabled_var.get() else 'DISABLE'}:STEP_COUNTER")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=2)
+        ttk.Checkbutton(activity_group, text="Enable Step Counter", variable=self.step_enabled_var,
+                       command=lambda: self.send_command(f"{'ENABLE' if self.step_enabled_var.get() else 'DISABLE'}:STEP_COUNTER")).grid(row=0, column=0, sticky=tk.W, pady=5, columnspan=3)
 
         self.step_count_var = tk.StringVar(value="0")
-        ttk.Label(step_group, text="Step Count:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(step_group, textvariable=self.step_count_var, font=("Arial", 14, "bold")).grid(row=1, column=1, sticky=tk.W, pady=5, padx=10)
+        ttk.Label(activity_group, text="Step Count:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(activity_group, textvariable=self.step_count_var, font=("Arial", 12, "bold")).grid(row=1, column=1, sticky=tk.W, pady=5)
 
-        ttk.Button(step_group, text="Get Count", command=lambda: self.send_command("GET_STEP_COUNT")).grid(row=2, column=0, pady=5, padx=5)
-        ttk.Button(step_group, text="Reset Counter", command=lambda: self.send_command("RESET_STEP_COUNT")).grid(row=2, column=1, pady=5, padx=5)
+        ttk.Button(activity_group, text="Get Count", command=lambda: self.send_command("GET_STEP_COUNT")).grid(row=2, column=0, pady=5, padx=5)
+        ttk.Button(activity_group, text="Reset Counter", command=lambda: self.send_command("RESET_STEP_COUNT")).grid(row=2, column=1, pady=5, padx=5)
 
         # Self-Test
-        selftest_group = ttk.LabelFrame(step_cal_frame, text="Self-Test", padding="10")
-        selftest_group.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N))
-
-        ttk.Button(selftest_group, text="Run Self-Test", command=lambda: self.send_command("SELF_TEST")).grid(row=0, column=0, pady=5, padx=5)
+        ttk.Label(activity_group, text="Self-Test:", font=("Arial", 10, "bold")).grid(row=3, column=0, sticky=tk.W, pady=(10,5), columnspan=3)
+        ttk.Button(activity_group, text="Run Self-Test", command=lambda: self.send_command("SELF_TEST")).grid(row=4, column=0, pady=5, padx=5, columnspan=2)
 
         self.selftest_result_var = tk.StringVar(value="Not tested")
-        ttk.Label(selftest_group, text="Result:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(selftest_group, textvariable=self.selftest_result_var).grid(row=1, column=1, sticky=tk.W, pady=5, padx=10)
+        ttk.Label(activity_group, text="Result:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(activity_group, textvariable=self.selftest_result_var).grid(row=5, column=1, sticky=tk.W, pady=5)
 
-        # Note: Calibration section has been moved to Configuration tab (Accelerometer Offset panel)
-
-        # --- Sub-tab 5: Event Log ---
-        event_log_frame = ttk.Frame(int_notebook, padding="10")
-        int_notebook.add(event_log_frame, text="Event Log")
+        # ===== Tab 5: Event Log =====
+        event_log_frame = ttk.Frame(notebook, padding="5")
+        notebook.add(event_log_frame, text="Event Log")
 
         # Event Log
         log_group = ttk.LabelFrame(event_log_frame, text="Event Log", padding="10")
@@ -899,7 +893,7 @@ class LSM6DSV_GUI:
         ttk.Button(log_group, text="Clear Log",
                   command=lambda: self.interrupt_log.delete(1.0, tk.END)).pack(pady=5)
 
-        # Event Counters (in same tab)
+        # Event Counters
         counter_group = ttk.LabelFrame(event_log_frame, text="Event Counters", padding="10")
         counter_group.pack(fill=tk.X, padx=10, pady=10)
 
@@ -922,7 +916,7 @@ class LSM6DSV_GUI:
         ttk.Button(counter_group, text="Reset All Counters",
                   command=self.reset_event_counters).pack(pady=10)
 
-        # ===== Tab 5: Console/Log =====
+        # ===== Tab 6: Console =====
         console_frame = ttk.Frame(notebook, padding="5")
         notebook.add(console_frame, text="Console")
 
@@ -2169,6 +2163,234 @@ class LSM6DSV_GUI:
         self.log_message("\n[6/6] Configuration Complete!\n")
         self.log_message("=" * 60 + "\n")
         self.log_message("ALL SETTINGS APPLIED SUCCESSFULLY\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_ultra_low(self):
+        """Preset 1: Ultra Low Power (~4 µA) - Absolute minimum power"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: Ultra Low Power (~4 µA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("1.875 Hz")
+        self.acc_fs_var.set("±2g")
+        self.acc_mode_var.set("Low Power (2-avg)")
+        self.gyro_odr_var.set("Power Down (0 Hz)")
+        self.sflp_enabled_var.set(False)
+
+        # Accelerometer only, lowest ODR, Low Power mode
+        self.send_command("SET:ACC_ODR:1.875")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:2g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:4")  # Low Power (2-avg)
+        time.sleep(0.02)
+
+        # Turn off gyroscope
+        self.send_command("SET:GYRO_ODR:0")
+        time.sleep(0.02)
+
+        # Disable sensor fusion
+        self.send_command("DISABLE:SFLP")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=1.875Hz/±2g/LP, GYRO=OFF, SFLP=OFF\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_low_power(self):
+        """Preset 2: Low Power IMU (~25 µA) - Both sensors, low rate"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: Low Power IMU (~25 µA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("7.5 Hz")
+        self.acc_fs_var.set("±2g")
+        self.acc_mode_var.set("Low Power (2-avg)")
+        self.gyro_odr_var.set("7.5 Hz")
+        self.gyro_fs_var.set("±250 dps")
+        self.gyro_mode_var.set("Low Power")
+        self.sflp_enabled_var.set(False)
+
+        # Accelerometer: 7.5 Hz, Low Power mode
+        self.send_command("SET:ACC_ODR:7.5")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:2g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:4")  # Low Power (2-avg)
+        time.sleep(0.02)
+
+        # Gyroscope: 7.5 Hz, Low Power mode
+        self.send_command("SET:GYRO_ODR:7.5")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_FS:250")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_MODE:5")  # Low Power
+        time.sleep(0.02)
+
+        # Disable sensor fusion
+        self.send_command("DISABLE:SFLP")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=7.5Hz/±2g/LP, GYRO=7.5Hz/±250dps/LP, SFLP=OFF\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_balanced(self):
+        """Preset 3: Balanced Power (~100 µA) - Normal operation"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: Balanced Power (~100 µA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("30 Hz")
+        self.acc_fs_var.set("±4g")
+        self.acc_mode_var.set("Normal")
+        self.gyro_odr_var.set("30 Hz")
+        self.gyro_fs_var.set("±500 dps")
+        self.gyro_mode_var.set("Low Power")
+        self.sflp_enabled_var.set(False)
+
+        # Accelerometer: 30 Hz, Normal mode
+        self.send_command("SET:ACC_ODR:30")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:4g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:7")  # Normal mode
+        time.sleep(0.02)
+
+        # Gyroscope: 30 Hz, Low Power mode
+        self.send_command("SET:GYRO_ODR:30")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_FS:500")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_MODE:5")  # Low Power
+        time.sleep(0.02)
+
+        # Disable sensor fusion
+        self.send_command("DISABLE:SFLP")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=30Hz/±4g/Normal, GYRO=30Hz/±500dps/LP, SFLP=OFF\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_standard(self):
+        """Preset 4: Standard Performance (~500 µA) - Good balance"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: Standard Performance (~500 µA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("120 Hz")
+        self.acc_fs_var.set("±4g")
+        self.acc_mode_var.set("High Performance")
+        self.gyro_odr_var.set("120 Hz")
+        self.gyro_fs_var.set("±2000 dps")
+        self.gyro_mode_var.set("High Performance")
+        self.sflp_enabled_var.set(False)
+
+        # Accelerometer: 120 Hz, High Performance mode
+        self.send_command("SET:ACC_ODR:120")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:4g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:0")  # High Performance
+        time.sleep(0.02)
+
+        # Gyroscope: 120 Hz, High Performance mode
+        self.send_command("SET:GYRO_ODR:120")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_FS:2000")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_MODE:0")  # High Performance
+        time.sleep(0.02)
+
+        # Disable sensor fusion
+        self.send_command("DISABLE:SFLP")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=120Hz/±4g/HP, GYRO=120Hz/±2000dps/HP, SFLP=OFF\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_high_perf(self):
+        """Preset 5: High Performance (~1.5 mA) - Fast sampling"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: High Performance (~1.5 mA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("480 Hz")
+        self.acc_fs_var.set("±8g")
+        self.acc_mode_var.set("High Performance")
+        self.gyro_odr_var.set("480 Hz")
+        self.gyro_fs_var.set("±2000 dps")
+        self.gyro_mode_var.set("High Performance")
+        self.sflp_enabled_var.set(True)
+        self.sflp_odr_var.set("120 Hz")
+
+        # Accelerometer: 480 Hz, High Performance mode
+        self.send_command("SET:ACC_ODR:480")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:8g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:0")  # High Performance
+        time.sleep(0.02)
+
+        # Gyroscope: 480 Hz, High Performance mode
+        self.send_command("SET:GYRO_ODR:480")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_FS:2000")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_MODE:0")  # High Performance
+        time.sleep(0.02)
+
+        # Enable sensor fusion
+        self.send_command("ENABLE:SFLP")
+        time.sleep(0.02)
+        self.send_command("SET:SFLP_ODR:120")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=480Hz/±8g/HP, GYRO=480Hz/±2000dps/HP, SFLP=ON@120Hz\n")
+        self.log_message("=" * 60 + "\n")
+
+    def apply_preset_max_perf(self):
+        """Preset 6: Maximum Performance (~3 mA) - Highest accuracy"""
+        self.log_message("=" * 60 + "\n")
+        self.log_message("APPLYING PRESET: Maximum Performance (~3 mA)\n")
+        self.log_message("=" * 60 + "\n")
+
+        # Update GUI dropdowns
+        self.acc_odr_var.set("125 Hz (HA1)")
+        self.acc_fs_var.set("±16g")
+        self.acc_mode_var.set("High Accuracy")
+        self.gyro_odr_var.set("125 Hz (HA1)")
+        self.gyro_fs_var.set("±4000 dps")
+        self.gyro_mode_var.set("High Accuracy")
+        self.sflp_enabled_var.set(True)
+        self.sflp_odr_var.set("120 Hz")
+
+        # Accelerometer: 125 Hz (HA1), High Accuracy mode
+        self.send_command("SET:ACC_ODR:125 (HA1)")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_FS:16g")
+        time.sleep(0.02)
+        self.send_command("SET:ACC_MODE:1")  # High Accuracy
+        time.sleep(0.02)
+
+        # Gyroscope: 125 Hz (HA1), High Accuracy mode
+        self.send_command("SET:GYRO_ODR:125 (HA1)")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_FS:4000")
+        time.sleep(0.02)
+        self.send_command("SET:GYRO_MODE:1")  # High Accuracy
+        time.sleep(0.02)
+
+        # Enable sensor fusion
+        self.send_command("ENABLE:SFLP")
+        time.sleep(0.02)
+        self.send_command("SET:SFLP_ODR:120")
+        time.sleep(0.02)
+
+        self.log_message("Preset applied: ACC=125Hz(HA1)/±16g/HA, GYRO=125Hz(HA1)/±4000dps/HA, SFLP=ON@120Hz\n")
         self.log_message("=" * 60 + "\n")
 
     def reset_event_counters(self):

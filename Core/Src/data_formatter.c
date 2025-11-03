@@ -307,6 +307,41 @@ int32_t data_formatter_send_config(char *buffer, uint16_t size, const sensor_con
     return len;
 }
 
+/**
+ * @brief  Stream sensor data via communication protocol
+ * @param  comm: Pointer to comm_protocol_t structure
+ * @param  sensor_data: Sensor data to stream
+ * @param  sflp_data: SFLP data (can be NULL)
+ * @retval 0 on success, -1 on error
+ */
+int32_t data_formatter_stream(comm_protocol_t *comm,
+                              const sensor_data_t *sensor_data,
+                              const sflp_data_t *sflp_data)
+{
+    if (comm == NULL || sensor_data == NULL) {
+        return -1;
+    }
+
+    char buffer[256];
+    int32_t len;
+
+    /* Format and send main sensor data */
+    len = data_formatter_csv_data(buffer, sizeof(buffer), sensor_data, NULL, NULL);
+    if (len > 0) {
+        comm_protocol_send_string(comm, buffer);
+    }
+
+    /* Format and send SFLP data if enabled and provided */
+    if (comm->include_sflp && sflp_data != NULL) {
+        len = data_formatter_csv_sflp(buffer, sizeof(buffer), sflp_data, sensor_data->timestamp);
+        if (len > 0) {
+            comm_protocol_send_string(comm, buffer);
+        }
+    }
+
+    return 0;
+}
+
 /* Private functions ---------------------------------------------------------*/
 
 /**
